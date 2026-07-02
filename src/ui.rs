@@ -21,6 +21,8 @@ const RED: Color = Color::Rgb(224, 116, 116);
 const MUTED: Color = Color::Rgb(112, 112, 120);
 const DIM: Color = Color::Rgb(70, 70, 77);
 const PANEL: Color = Color::Rgb(18, 18, 21);
+const SELECTED_PANEL: Color = Color::Rgb(27, 30, 31);
+const FRESH_PANEL: Color = Color::Rgb(20, 24, 22);
 
 pub fn draw(frame: &mut Frame, app: &App, watcher: &WatchState, git_repositories: usize) {
     let area = frame.area();
@@ -141,15 +143,20 @@ fn draw_filters(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_timeline(frame: &mut Frame, area: Rect, app: &App) {
     let visible = app.visible_indices();
+    let selected_color = app.selected_event().map(event_color).unwrap_or(DIM);
     let inner_height = area.height.saturating_sub(2) as usize;
-    let start = app.selected.saturating_sub(inner_height.saturating_sub(1));
+    let visible_rows = (inner_height / 2).max(1);
+    let start = app.selected.saturating_sub(visible_rows.saturating_sub(1));
+    let row_width = area.width.saturating_sub(2) as usize;
     let items = visible
         .iter()
         .skip(start)
-        .take(inner_height)
+        .take(visible_rows)
         .enumerate()
         .filter_map(|(offset, index)| app.events.get(*index).map(|event| (start + offset, event)))
-        .map(|(visible_index, event)| timeline_item(event, visible_index == app.selected));
+        .map(|(visible_index, event)| {
+            timeline_item(event, visible_index == app.selected, row_width)
+        });
 
     let title = format!(
         " TIMELINE  {}/{} ",
@@ -160,52 +167,87 @@ fn draw_timeline(frame: &mut Frame, area: Rect, app: &App) {
         List::new(items).block(
             Block::new()
                 .title(title)
-                .title_style(Style::default().fg(MUTED).bold())
+                .title_style(Style::default().fg(selected_color).bold())
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(DIM)),
+                .border_style(Style::default().fg(selected_color)),
         ),
         area,
     );
 }
 
-fn timeline_item(event: &ChangeEvent, selected: bool) -> ListItem<'static> {
+fn timeline_item(event: &ChangeEvent, selected: bool, width: usize) -> ListItem<'static> {
     let age = format_age(event.occurred_at.elapsed());
-    let path = event.path.to_string_lossy();
-    let prefix = if selected { "▌" } else { " " };
+    let fresh = event.occurred_at.elapsed() < Duration::from_secs(3);
+    let marker = if selected {
+        "▶"
+    } else if fresh {
+        "●"
+    } else {
+        " "
+    };
     let background = if selected {
-        Color::Rgb(29, 31, 31)
+        SELECTED_PANEL
+    } else if fresh {
+        FRESH_PANEL
     } else {
         Color::Reset
     };
+    let path = event.path.to_string_lossy();
+    let badge = event_badge(event);
+    let badge_width = badge.chars().count() + 2;
+    let suffix_width = age.len() + 3;
+    let path_width = width.saturating_sub(badge_width + suffix_width + 4).max(8);
     let stats = match (event.lines_added, event.lines_removed) {
         (0, 0) => String::new(),
         (added, removed) => format!(" +{added} -{removed}"),
     };
-    ListItem::new(Line::from(vec![
-        Span::styled(
-            prefix,
-            Style::default().fg(event_color(event)).bg(background),
-        ),
-        Span::styled(
-            format!(" {} ", event.kind.symbol()),
-            Style::default()
-                .fg(event_color(event))
-                .bg(background)
-                .bold(),
-        ),
-        Span::styled(
-            truncate_middle(&path, 34),
-            Style::default()
-                .fg(if selected {
-                    Color::White
-                } else {
-                    Color::Rgb(180, 180, 184)
-                })
-                .bg(background),
-        ),
-        Span::styled(stats, Style::default().fg(MUTED).bg(background)),
-        Span::styled(format!("  {age}"), Style::default().fg(DIM).bg(background)),
+    let freshness = if fresh { "  NEW" } else { "" };
+    let context = event_context(event);
+    let id_prefix = format!("  #{:<4} ", event.id);
+    let context_width = width
+        .saturating_sub(
+            id_prefix.chars().count()
+                + stats.chars().count()
+                + freshness.chars().count()
+                + age.chars().count()
+                + 2,
+        )
+        .max(8);
+
+    ListItem::new(Text::from(vec![
+        Line::from(vec![
+            Span::styled(
+                format!("{marker} "),
+                Style::default().fg(event_color(event)).bold(),
+            ),
+            badge_span(event),
+            Span::raw(" "),
+            Span::styled(
+                truncate_middle(&path, path_width),
+                Style::default()
+                    .fg(if selected {
+                        Color::White
+                    } else {
+                        Color::Rgb(190, 190, 195)
+                    })
+                    .bold(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                id_prefix,
+                Style::default().fg(if selected { event_color(event) } else { DIM }),
+            ),
+            Span::styled(
+                truncate_middle(&context, context_width),
+                Style::default().fg(if selected { MUTED } else { DIM }),
+            ),
+            Span::styled(stats, Style::default().fg(MUTED)),
+            Span::styled(freshness, Style::default().fg(event_color(event)).bold()),
+            Span::styled(format!("  {age}"), Style::default().fg(DIM)),
+        ]),
     ]))
+    .style(Style::default().bg(background))
 }
 
 fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
@@ -229,6 +271,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let root = compact_path(&event.root);
+    let color = event_color(event);
     let target = match event.target {
         TargetKind::Directory => "directory",
         TargetKind::Repository => "repository",
@@ -237,15 +280,9 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     };
     let mut lines = vec![
         Line::from(vec![
+            badge_span(event),
             Span::styled(
-                format!(" {} ", event.kind.label()),
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(event_color(event))
-                    .bold(),
-            ),
-            Span::styled(
-                format!("  {target}  #{}", event.id),
+                format!("  #{:<4} {target}", event.id),
                 Style::default().fg(MUTED),
             ),
             Span::styled(
@@ -253,20 +290,30 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
                     .integrity_level
                     .map(|level| format!("  {}", level.label()))
                     .unwrap_or_default(),
-                Style::default().fg(event_color(event)).bold(),
+                Style::default().fg(color).bold(),
+            ),
+            Span::styled(
+                format!("  {}", format_age(event.occurred_at.elapsed())),
+                Style::default().fg(DIM),
             ),
         ]),
         Line::styled(
             event.path.to_string_lossy().to_string(),
-            Style::default().fg(Color::White).bold(),
+            Style::default().fg(Color::White).bold().underlined(),
         ),
-        Line::styled(root, Style::default().fg(DIM)),
+        Line::from(vec![
+            Span::styled("ROOT  ", Style::default().fg(color).bold()),
+            Span::styled(root, Style::default().fg(MUTED)),
+        ]),
     ];
     if let Some(previous) = &event.previous_path {
         lines.push(Line::from(vec![
             Span::styled(previous.to_string_lossy(), Style::default().fg(MUTED)),
-            Span::styled("  →  ", Style::default().fg(BLUE)),
-            Span::styled(event.path.to_string_lossy(), Style::default().fg(BLUE)),
+            Span::styled("  →  ", Style::default().fg(color).bold()),
+            Span::styled(
+                event.path.to_string_lossy(),
+                Style::default().fg(color).bold(),
+            ),
         ]));
     }
     lines.push(Line::from(""));
@@ -280,7 +327,10 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             _ if event.target == TargetKind::Directory => "directory event",
             _ => "metadata changed",
         });
-        lines.push(Line::styled(detail, Style::default().fg(MUTED)));
+        lines.push(Line::from(vec![
+            Span::styled("DETAIL  ", Style::default().fg(color).bold()),
+            Span::styled(detail, Style::default().fg(Color::Rgb(180, 180, 185))),
+        ]));
         if event.size > 0 {
             lines.push(Line::styled(
                 format!("{} bytes", event.size),
@@ -289,14 +339,15 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
         }
     } else {
         lines.push(Line::from(vec![
+            Span::styled("DIFF  ", Style::default().fg(color).bold()),
             Span::styled(
-                format!("+{}", event.lines_added),
-                Style::default().fg(GREEN).bold(),
+                format!(" +{} ", event.lines_added),
+                Style::default().fg(Color::Black).bg(GREEN).bold(),
             ),
             Span::raw("  "),
             Span::styled(
-                format!("-{}", event.lines_removed),
-                Style::default().fg(RED).bold(),
+                format!(" -{} ", event.lines_removed),
+                Style::default().fg(Color::Black).bg(RED).bold(),
             ),
         ]));
         lines.push(Line::from(""));
@@ -330,7 +381,23 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
-            .block(panel(" CHANGE PREVIEW ")),
+            .block(
+                Block::new()
+                    .title(Line::from(vec![
+                        Span::styled(
+                            " SELECTED ",
+                            Style::default().fg(Color::Black).bg(color).bold(),
+                        ),
+                        Span::styled(
+                            format!("  {}  #{} ", event_badge(event), event.id),
+                            Style::default().fg(color).bold(),
+                        ),
+                    ]))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(color))
+                    .padding(Padding::new(1, 1, 1, 1))
+                    .style(Style::default().bg(PANEL)),
+            ),
         area,
     );
 }
@@ -441,6 +508,52 @@ fn kind_color(kind: ChangeKind) -> Color {
         ChangeKind::Delete => RED,
         ChangeKind::Git => Color::Rgb(196, 143, 255),
         ChangeKind::Integrity => Color::Rgb(255, 109, 109),
+    }
+}
+
+fn event_badge(event: &ChangeEvent) -> String {
+    event.kind.label().to_string()
+}
+
+fn badge_span(event: &ChangeEvent) -> Span<'static> {
+    Span::styled(
+        format!(" {} ", event_badge(event)),
+        Style::default()
+            .fg(Color::Black)
+            .bg(event_color(event))
+            .bold(),
+    )
+}
+
+fn event_context(event: &ChangeEvent) -> String {
+    if let Some(previous) = &event.previous_path {
+        return format!("{} → {}", previous.display(), event.path.display());
+    }
+    match event.target {
+        TargetKind::Repository => event
+            .detail
+            .clone()
+            .unwrap_or_else(|| compact_path(&event.root)),
+        TargetKind::Observer => {
+            let severity = event
+                .integrity_level
+                .map(|level| level.label())
+                .unwrap_or("INFO");
+            format!(
+                "{severity} · {}",
+                event
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| compact_path(&event.root))
+            )
+        }
+        TargetKind::Directory => format!("directory · {}", compact_path(&event.root)),
+        TargetKind::File => event
+            .path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| compact_path(&event.root)),
     }
 }
 

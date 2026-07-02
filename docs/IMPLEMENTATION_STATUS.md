@@ -18,6 +18,15 @@ It is not yet appropriate to describe the timeline as a complete forensic record
 | Portability | Unproven beyond macOS | Built on cross-platform crates, but runtime behavior has only been exercised locally on macOS |
 | Persistence | Not implemented | Timeline is intentionally process-local and memory-only |
 
+## Interface hierarchy
+
+- Timeline rows use a two-line layout: event family/action and path first, then event ID, context, diff counts, freshness, and age.
+- The selected row and preview share the same event-colored badge, event ID, and border color, creating a direct visual link between panes.
+- New events receive a short-lived marker, background, and `NEW` label that fades after three seconds without requiring notifications.
+- FILE diff totals use filled add/remove chips, while changed lines retain add/remove coloring in the preview.
+- INTEGRITY severity remains separate from the event-family badge so the category and observer state are both immediately visible.
+- The same hierarchy is used in stacked 80-column and split-pane wide layouts.
+
 ## FILE implementation
 
 ### Implemented
