@@ -35,6 +35,8 @@ pub struct App {
     pub search_mode: bool,
     pub enabled: [bool; 6],
     pub status: Option<String>,
+    pub catching_up: bool,
+    pub workspace_filter: Option<PathBuf>,
     pub max_events: usize,
     observer_level: IntegrityLevel,
     next_id: u64,
@@ -54,6 +56,8 @@ impl App {
             search_mode: false,
             enabled: [true; 6],
             status: None,
+            catching_up: false,
+            workspace_filter: None,
             max_events,
             observer_level: IntegrityLevel::Info,
             next_id: 1,
@@ -68,6 +72,11 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, event)| self.kind_enabled(event.kind))
+            .filter(|(_, event)| {
+                self.workspace_filter
+                    .as_ref()
+                    .is_none_or(|root| &event.root == root)
+            })
             .filter(|(_, event)| {
                 query.is_empty()
                     || event.path.to_string_lossy().to_lowercase().contains(&query)
@@ -105,6 +114,28 @@ impl App {
             *enabled = !*enabled;
             self.selected = 0;
         }
+    }
+
+    pub fn cycle_workspace(&mut self, roots: &[PathBuf], reverse: bool) {
+        if roots.is_empty() {
+            self.workspace_filter = None;
+            return;
+        }
+        let next = match (&self.workspace_filter, reverse) {
+            (None, false) => Some(roots[0].clone()),
+            (None, true) => roots.last().cloned(),
+            (Some(current), false) => roots
+                .iter()
+                .position(|root| root == current)
+                .and_then(|index| roots.get(index + 1).cloned()),
+            (Some(current), true) => roots
+                .iter()
+                .position(|root| root == current)
+                .and_then(|index| index.checked_sub(1))
+                .and_then(|index| roots.get(index).cloned()),
+        };
+        self.workspace_filter = next;
+        self.selected = 0;
     }
 
     pub fn toggle_pause(&mut self) {
@@ -809,6 +840,36 @@ mod tests {
         app.clear();
         assert_eq!(app.observer_level(), IntegrityLevel::Lost);
         assert!(app.events.is_empty());
+    }
+
+    #[test]
+    fn workspace_focus_cycles_and_filters_without_reordering() {
+        let first = PathBuf::from("/workspace/first");
+        let second = PathBuf::from("/workspace/second");
+        let roots = vec![first.clone(), second.clone()];
+        let mut app = App::new(20);
+        for root in &roots {
+            app.process_integrity(IntegrityEvent {
+                level: IntegrityLevel::Info,
+                source: "filesystem",
+                summary: "watch established".into(),
+                detail: "native recursive filesystem events are active".into(),
+                root: root.clone(),
+            });
+        }
+
+        assert_eq!(app.visible_indices().len(), 2);
+        app.cycle_workspace(&roots, false);
+        assert_eq!(app.workspace_filter, Some(first));
+        assert_eq!(app.visible_indices().len(), 1);
+        app.cycle_workspace(&roots, false);
+        assert_eq!(app.workspace_filter, Some(second));
+        assert_eq!(app.visible_indices().len(), 1);
+        app.cycle_workspace(&roots, false);
+        assert_eq!(app.workspace_filter, None);
+        assert_eq!(app.visible_indices().len(), 2);
+        app.cycle_workspace(&roots, true);
+        assert_eq!(app.workspace_filter, roots.last().cloned());
     }
 
     fn temporary_directory(label: &str) -> PathBuf {

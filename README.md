@@ -70,6 +70,7 @@ Integrity levels are `INFO`, `DEGRADED`, `UNCERTAIN`, and `LOST`. An uncertainty
 | --- | --- |
 | `j` / `k`, arrows | Move through the timeline |
 | `/` | Filter by path or summary |
+| `w` / `W` | Cycle workspace focus forward/backward (`ALL` included) |
 | `1`–`4` | Toggle FILE modify/create/move/delete actions |
 | `5` | Toggle GIT events |
 | `6` | Toggle INTEGRITY events |
@@ -82,6 +83,9 @@ Integrity levels are `INFO`, `DEGRADED`, `UNCERTAIN`, and `LOST`. An uncertainty
 
 - Seeds an initial filesystem snapshot silently, so existing files do not flood the timeline.
 - Uses native recursive filesystem notifications through `notify`.
+- Keeps one observed-order timeline across roots and prefixes every event with a stable, colored workspace label.
+- Uses the shortest unique path suffix for same-named roots, such as `team/api` and `other/api`.
+- Processes filesystem activity in bounded render batches so sustained concurrent changes cannot indefinitely starve the TUI.
 - Ignores `.git`, `node_modules`, `target`, `dist`, and `coverage` in the FILE stream.
 - Observes `.git` separately through the semantic GIT pipeline.
 - Retains 1,000 events in memory by default; adjust with `--max-events`.

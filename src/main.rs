@@ -24,6 +24,8 @@ use model::{IntegrityEvent, IntegrityLevel};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use watcher::WatchState;
 
+const MAX_FILESYSTEM_EVENTS_PER_TICK: usize = 512;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "flux",
@@ -72,9 +74,15 @@ fn run(
 ) -> Result<()> {
     let mut filesystem_disconnected = false;
     while !app.should_quit {
+        let mut filesystem_events = 0;
         loop {
+            if filesystem_events >= MAX_FILESYSTEM_EVENTS_PER_TICK {
+                app.catching_up = true;
+                break;
+            }
             match watcher.receiver.try_recv() {
                 Ok(Ok(event)) => {
+                    filesystem_events += 1;
                     for git_event in git_monitor.observe_workspace_event(&event) {
                         match git_event {
                             GitMonitorEvent::Activity(activity) => app.process_git(activity),
@@ -93,7 +101,10 @@ fn run(
                         &fallback,
                     ));
                 }
-                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Empty) => {
+                    app.catching_up = false;
+                    break;
+                }
                 Err(TryRecvError::Disconnected) => {
                     if !filesystem_disconnected {
                         filesystem_disconnected = true;
@@ -122,13 +133,13 @@ fn run(
             && let TerminalEvent::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            handle_key(app, key.code, key.modifiers);
+            handle_key(app, key.code, key.modifiers, &watcher.roots);
         }
     }
     Ok(())
 }
 
-fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers, roots: &[PathBuf]) {
     if app.search_mode {
         match code {
             KeyCode::Esc | KeyCode::Enter => app.search_mode = false,
@@ -167,6 +178,8 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('4') => app.toggle_kind(3),
         KeyCode::Char('5') => app.toggle_kind(4),
         KeyCode::Char('6') => app.toggle_kind(5),
+        KeyCode::Char('w') => app.cycle_workspace(roots, false),
+        KeyCode::Char('W') => app.cycle_workspace(roots, true),
         _ => {}
     }
 }

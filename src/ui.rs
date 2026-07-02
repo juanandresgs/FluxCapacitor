@@ -23,6 +23,16 @@ const DIM: Color = Color::Rgb(70, 70, 77);
 const PANEL: Color = Color::Rgb(18, 18, 21);
 const SELECTED_PANEL: Color = Color::Rgb(27, 30, 31);
 const FRESH_PANEL: Color = Color::Rgb(20, 24, 22);
+const WORKSPACE_COLORS: [Color; 8] = [
+    Color::Rgb(104, 190, 255),
+    Color::Rgb(220, 140, 255),
+    Color::Rgb(105, 210, 190),
+    Color::Rgb(245, 180, 100),
+    Color::Rgb(245, 130, 155),
+    Color::Rgb(170, 190, 110),
+    Color::Rgb(135, 155, 245),
+    Color::Rgb(190, 160, 120),
+];
 
 pub fn draw(frame: &mut Frame, app: &App, watcher: &WatchState, git_repositories: usize) {
     let area = frame.area();
@@ -35,20 +45,20 @@ pub fn draw(frame: &mut Frame, app: &App, watcher: &WatchState, git_repositories
     .split(area);
 
     draw_header(frame, layout[0], app, watcher, git_repositories);
-    draw_filters(frame, layout[1], app);
+    draw_filters(frame, layout[1], app, watcher);
 
     if area.width >= 100 {
         let body = Layout::horizontal([Constraint::Percentage(44), Constraint::Percentage(56)])
             .spacing(1)
             .split(layout[2]);
-        draw_timeline(frame, body[0], app);
-        draw_detail(frame, body[1], app);
+        draw_timeline(frame, body[0], app, watcher);
+        draw_detail(frame, body[1], app, watcher);
     } else {
         let body = Layout::vertical([Constraint::Percentage(52), Constraint::Percentage(48)])
             .spacing(1)
             .split(layout[2]);
-        draw_timeline(frame, body[0], app);
-        draw_detail(frame, body[1], app);
+        draw_timeline(frame, body[0], app, watcher);
+        draw_detail(frame, body[1], app, watcher);
     }
 
     draw_footer(frame, layout[3], app);
@@ -61,21 +71,27 @@ fn draw_header(
     watcher: &WatchState,
     git_repositories: usize,
 ) {
-    let roots = watcher
-        .roots
-        .iter()
-        .map(|root| compact_path(root))
-        .collect::<Vec<_>>()
-        .join("  ·  ");
+    let roots = if watcher.roots.len() > 2 {
+        format!("{} workspaces", watcher.roots.len())
+    } else {
+        watcher
+            .roots
+            .iter()
+            .map(|root| compact_path(root))
+            .collect::<Vec<_>>()
+            .join("  ·  ")
+    };
     let observer_level = app.observer_level();
     let live = if app.paused {
         format!(" PAUSED  +{} queued ", app.paused_events.len())
+    } else if app.catching_up {
+        " CATCHING UP ".to_string()
     } else if observer_level != crate::model::IntegrityLevel::Info {
         format!(" {} ", observer_level.label())
     } else {
         " ● LIVE ".to_string()
     };
-    let live_color = if app.paused {
+    let live_color = if app.paused || app.catching_up {
         AMBER
     } else {
         integrity_color(observer_level)
@@ -107,15 +123,35 @@ fn draw_header(
     frame.render_widget(Paragraph::new(status).block(bottom_border()), columns[1]);
 }
 
-fn draw_filters(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_filters(frame: &mut Frame, area: Rect, app: &App, watcher: &WatchState) {
     let mut spans = vec![Span::styled(
         format!(" {} events  ", app.events.len()),
         Style::default().fg(Color::White).bold(),
     )];
+    let workspace_label = app
+        .workspace_filter
+        .as_ref()
+        .map(|root| watcher.root_label(root))
+        .unwrap_or_else(|| "ALL".into());
+    let workspace_color = app
+        .workspace_filter
+        .as_ref()
+        .map(|root| workspace_color(watcher.root_index(root)))
+        .unwrap_or(BLUE);
+    spans.push(Span::styled(
+        format!(" w:{workspace_label} "),
+        Style::default().fg(Color::Black).bg(workspace_color).bold(),
+    ));
+    spans.push(Span::raw(" "));
     for (index, kind) in ChangeKind::ALL.iter().enumerate() {
         let active = app.enabled[index];
+        let label = if area.width < 100 {
+            format!(" {}{} ", index + 1, kind.symbol())
+        } else {
+            format!(" {}:{} {} ", index + 1, kind.symbol(), kind.label())
+        };
         spans.push(Span::styled(
-            format!(" {}:{} {} ", index + 1, kind.symbol(), kind.label()),
+            label,
             Style::default()
                 .fg(if active { kind_color(*kind) } else { DIM })
                 .add_modifier(if active {
@@ -141,7 +177,7 @@ fn draw_filters(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-fn draw_timeline(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_timeline(frame: &mut Frame, area: Rect, app: &App, watcher: &WatchState) {
     let visible = app.visible_indices();
     let selected_color = app.selected_event().map(event_color).unwrap_or(DIM);
     let inner_height = area.height.saturating_sub(2) as usize;
@@ -155,7 +191,7 @@ fn draw_timeline(frame: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .filter_map(|(offset, index)| app.events.get(*index).map(|event| (start + offset, event)))
         .map(|(visible_index, event)| {
-            timeline_item(event, visible_index == app.selected, row_width)
+            timeline_item(event, visible_index == app.selected, row_width, watcher)
         });
 
     let title = format!(
@@ -175,7 +211,12 @@ fn draw_timeline(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-fn timeline_item(event: &ChangeEvent, selected: bool, width: usize) -> ListItem<'static> {
+fn timeline_item(
+    event: &ChangeEvent,
+    selected: bool,
+    width: usize,
+    watcher: &WatchState,
+) -> ListItem<'static> {
     let age = format_age(event.occurred_at.elapsed());
     let fresh = event.occurred_at.elapsed() < Duration::from_secs(3);
     let marker = if selected {
@@ -195,8 +236,15 @@ fn timeline_item(event: &ChangeEvent, selected: bool, width: usize) -> ListItem<
     let path = event.path.to_string_lossy();
     let badge = event_badge(event);
     let badge_width = badge.chars().count() + 2;
+    let workspace = (watcher.roots.len() > 1).then(|| watcher.root_label(&event.root));
+    let workspace_width = workspace
+        .as_ref()
+        .map(|label| label.chars().count() + 3)
+        .unwrap_or(0);
     let suffix_width = age.len() + 3;
-    let path_width = width.saturating_sub(badge_width + suffix_width + 4).max(8);
+    let path_width = width
+        .saturating_sub(badge_width + workspace_width + suffix_width + 4)
+        .max(8);
     let stats = match (event.lines_added, event.lines_removed) {
         (0, 0) => String::new(),
         (added, removed) => format!(" +{added} -{removed}"),
@@ -220,6 +268,9 @@ fn timeline_item(event: &ChangeEvent, selected: bool, width: usize) -> ListItem<
                 format!("{marker} "),
                 Style::default().fg(event_color(event)).bold(),
             ),
+            workspace
+                .map(|label| workspace_span(&label, watcher.root_index(&event.root)))
+                .unwrap_or_else(|| Span::raw("")),
             badge_span(event),
             Span::raw(" "),
             Span::styled(
@@ -250,7 +301,7 @@ fn timeline_item(event: &ChangeEvent, selected: bool, width: usize) -> ListItem<
     .style(Style::default().bg(background))
 }
 
-fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_detail(frame: &mut Frame, area: Rect, app: &App, watcher: &WatchState) {
     let Some(event) = app.selected_event() else {
         let empty = Paragraph::new(Text::from(vec![
             Line::from(""),
@@ -272,6 +323,8 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
 
     let root = compact_path(&event.root);
     let color = event_color(event);
+    let workspace_label = watcher.root_label(&event.root);
+    let workspace_index = watcher.root_index(&event.root);
     let target = match event.target {
         TargetKind::Directory => "directory",
         TargetKind::Repository => "repository",
@@ -280,6 +333,11 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     };
     let mut lines = vec![
         Line::from(vec![
+            if watcher.roots.len() > 1 {
+                workspace_span(&workspace_label, workspace_index)
+            } else {
+                Span::raw("")
+            },
             badge_span(event),
             Span::styled(
                 format!("  #{:<4} {target}", event.id),
@@ -302,7 +360,12 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::White).bold().underlined(),
         ),
         Line::from(vec![
-            Span::styled("ROOT  ", Style::default().fg(color).bold()),
+            Span::styled(
+                "WORKSPACE  ",
+                Style::default().fg(workspace_color(workspace_index)).bold(),
+            ),
+            Span::styled(workspace_label, Style::default().fg(Color::White).bold()),
+            Span::styled("  ROOT  ", Style::default().fg(color).bold()),
             Span::styled(root, Style::default().fg(MUTED)),
         ]),
     ];
@@ -388,6 +451,11 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
                             " SELECTED ",
                             Style::default().fg(Color::Black).bg(color).bold(),
                         ),
+                        if watcher.roots.len() > 1 {
+                            workspace_span(&watcher.root_label(&event.root), workspace_index)
+                        } else {
+                            Span::raw("")
+                        },
                         Span::styled(
                             format!("  {}  #{} ", event_badge(event), event.id),
                             Style::default().fg(color).bold(),
@@ -418,6 +486,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 hint(" move  "),
                 key("/"),
                 hint(" find  "),
+                key("w"),
+                hint(" root  "),
                 key("1-6"),
                 hint(" types  "),
                 key("spc"),
@@ -431,6 +501,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 hint(" move  "),
                 key("/"),
                 hint(" search  "),
+                key("w"),
+                hint(" workspace  "),
                 key("1-6"),
                 hint(" filters  "),
                 key("space"),
@@ -509,6 +581,20 @@ fn kind_color(kind: ChangeKind) -> Color {
         ChangeKind::Git => Color::Rgb(196, 143, 255),
         ChangeKind::Integrity => Color::Rgb(255, 109, 109),
     }
+}
+
+fn workspace_color(index: usize) -> Color {
+    WORKSPACE_COLORS[index % WORKSPACE_COLORS.len()]
+}
+
+fn workspace_span(label: &str, index: usize) -> Span<'static> {
+    Span::styled(
+        format!(" {} ", truncate_middle(label, 16)),
+        Style::default()
+            .fg(Color::Black)
+            .bg(workspace_color(index))
+            .bold(),
+    )
 }
 
 fn event_badge(event: &ChangeEvent) -> String {

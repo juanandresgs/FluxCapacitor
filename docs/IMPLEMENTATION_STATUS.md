@@ -14,7 +14,7 @@ It is not yet appropriate to describe the timeline as a complete forensic record
 | FILE | Strong alpha | Main operations and diffs work; boundary moves and complex directory renames need more platform testing |
 | GIT | Good alpha | Broad semantic ref/state coverage; some repository layouts and ambiguous operation outcomes remain intentionally limited |
 | INTEGRITY | Good foundation | Explicit rescan, error, channel, root-loss, and read-failure reporting; no automatic recovery or reconciliation |
-| Tests | Moderate | Sixteen deterministic tests including real native Git commit/ref events and macOS-imprecise rename shapes; platform matrix remains narrow |
+| Tests | Moderate | Twenty deterministic tests including concurrent native multi-root activity, real native Git commit/ref events, and macOS-imprecise rename shapes; platform matrix remains narrow |
 | Portability | Unproven beyond macOS | Built on cross-platform crates, but runtime behavior has only been exercised locally on macOS |
 | Persistence | Not implemented | Timeline is intentionally process-local and memory-only |
 
@@ -25,6 +25,9 @@ It is not yet appropriate to describe the timeline as a complete forensic record
 - New events receive a short-lived marker, background, and `NEW` label that fades after three seconds without requiring notifications.
 - FILE diff totals use filled add/remove chips, while changed lines retain add/remove coloring in the preview.
 - INTEGRITY severity remains separate from the event-family badge so the category and observer state are both immediately visible.
+- With multiple roots, every timeline row and preview carries the same stable, colored workspace label. Same-named roots use their shortest unique path suffix.
+- `w` and `W` cycle a workspace focus without changing the retained global timeline or its observed order.
+- Filesystem intake is capped at 512 events per render pass; `CATCHING UP` appears while Flux yields to keep interaction and drawing responsive under sustained activity.
 - The same hierarchy is used in stacked 80-column and split-pane wide layouts.
 
 ## FILE implementation
@@ -32,6 +35,7 @@ It is not yet appropriate to describe the timeline as a complete forensic record
 ### Implemented
 
 - Recursive native watching for multiple roots.
+- Deepest-root ownership for overlapping roots, so a path is attributed to the most specific configured workspace.
 - Silent initial snapshots.
 - File and directory create, modify, remove, and rename events.
 - Paired rename events and split rename events.
@@ -56,6 +60,7 @@ It is not yet appropriate to describe the timeline as a complete forensic record
 - Invalid UTF-8 is treated as non-text and receives no textual diff.
 - Ignore rules are currently compiled into the application rather than configurable.
 - The timeline is not persisted across runs.
+- Ordering across independent roots is callback arrival order. Flux does not claim causal ordering between simultaneous operations on different filesystems or watcher backends.
 
 ### Quality judgment
 
@@ -150,6 +155,10 @@ The current automated suite covers:
 14. Replacement create signals classified as modifications.
 15. A real repository commit, tag, and branch creation waking the native Git watcher.
 16. Repository initialization joining the stream from a `.git` creation event.
+17. Shortest-unique-suffix labels for same-named roots.
+18. Deepest-root attribution for overlapping roots.
+19. Workspace focus cycling and filtering without timeline reordering.
+20. Concurrent native filesystem events arriving from two watched roots.
 
 ## Recommended next hardening work
 

@@ -25,6 +25,7 @@ pub struct Snapshot {
 
 pub struct WatchState {
     pub roots: Vec<PathBuf>,
+    root_labels: HashMap<PathBuf, String>,
     pub snapshots: HashMap<PathBuf, Snapshot>,
     pub receiver: Receiver<notify::Result<Event>>,
     _watcher: RecommendedWatcher,
@@ -53,8 +54,10 @@ impl WatchState {
             seed_snapshots(root, &mut snapshots);
         }
 
+        let root_labels = build_root_labels(&roots);
         Ok(Self {
             roots,
+            root_labels,
             snapshots,
             receiver,
             _watcher: watcher,
@@ -102,6 +105,20 @@ impl WatchState {
         self.roots.iter().any(|root| root == path)
     }
 
+    pub fn root_label(&self, root: &Path) -> String {
+        self.root_labels
+            .get(root)
+            .cloned()
+            .unwrap_or_else(|| root.display().to_string())
+    }
+
+    pub fn root_index(&self, root: &Path) -> usize {
+        self.roots
+            .iter()
+            .position(|candidate| candidate == root)
+            .unwrap_or(0)
+    }
+
     pub fn established_events(&self) -> Vec<IntegrityEvent> {
         self.roots
             .iter()
@@ -114,6 +131,33 @@ impl WatchState {
             })
             .collect()
     }
+}
+
+fn build_root_labels(roots: &[PathBuf]) -> HashMap<PathBuf, String> {
+    roots
+        .iter()
+        .map(|root| {
+            let components = root
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            let label = (1..=components.len())
+                .find_map(|depth| {
+                    let suffix = &components[components.len() - depth..];
+                    let unique = roots.iter().filter(|candidate| {
+                        let candidate_components = candidate
+                            .components()
+                            .map(|component| component.as_os_str().to_string_lossy().to_string())
+                            .collect::<Vec<_>>();
+                        candidate_components.len() >= depth
+                            && candidate_components[candidate_components.len() - depth..] == *suffix
+                    });
+                    (unique.count() == 1).then(|| suffix.join("/"))
+                })
+                .unwrap_or_else(|| root.display().to_string());
+            (root.clone(), label)
+        })
+        .collect()
 }
 
 pub fn integrity_from_notify_error(
@@ -278,6 +322,12 @@ fn ignored_entry(entry: &DirEntry) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::{Arc, Barrier},
+        thread,
+        time::{Duration, Instant, SystemTime},
+    };
+
     use notify::Error;
 
     use super::*;
@@ -311,5 +361,81 @@ mod tests {
         );
         assert_eq!(event.level, IntegrityLevel::Uncertain);
         assert_eq!(event.summary, "native events may have been lost");
+    }
+
+    #[test]
+    fn labels_same_named_roots_with_shortest_unique_suffix() {
+        let roots = vec![
+            PathBuf::from("/work/team/api"),
+            PathBuf::from("/work/other/api"),
+            PathBuf::from("/work/team/web"),
+        ];
+        let labels = build_root_labels(&roots);
+        assert_eq!(labels[&roots[0]], "team/api");
+        assert_eq!(labels[&roots[1]], "other/api");
+        assert_eq!(labels[&roots[2]], "web");
+    }
+
+    #[test]
+    fn overlapping_roots_assign_events_to_the_deepest_workspace() {
+        let parent = PathBuf::from("/work/project");
+        let child = parent.join("packages/api");
+        let state =
+            WatchState::start(vec![temporary_directory("parent")]).expect("temporary watch state");
+        let mut state = state;
+        state.roots = vec![parent, child.clone()];
+        assert_eq!(state.root_for(&child.join("src/main.rs")), child);
+    }
+
+    #[test]
+    fn receives_native_events_from_multiple_roots_concurrently() {
+        let first = temporary_directory("multi-first")
+            .canonicalize()
+            .expect("canonical first root");
+        let second = temporary_directory("multi-second")
+            .canonicalize()
+            .expect("canonical second root");
+        let state = WatchState::start(vec![first.clone(), second.clone()]).expect("watch state");
+        let barrier = Arc::new(Barrier::new(3));
+
+        let first_writer = spawn_writer(barrier.clone(), first.join("first.txt"));
+        let second_writer = spawn_writer(barrier.clone(), second.join("second.txt"));
+        barrier.wait();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw_first = false;
+        let mut saw_second = false;
+        while Instant::now() < deadline && !(saw_first && saw_second) {
+            let Ok(result) = state.receiver.recv_timeout(Duration::from_millis(250)) else {
+                continue;
+            };
+            let event = result.expect("native event");
+            saw_first |= event.paths.iter().any(|path| path.starts_with(&first));
+            saw_second |= event.paths.iter().any(|path| path.starts_with(&second));
+        }
+
+        first_writer.join().expect("first writer");
+        second_writer.join().expect("second writer");
+        assert!(saw_first, "first root did not produce a native event");
+        assert!(saw_second, "second root did not produce a native event");
+        let _ = fs::remove_dir_all(first);
+        let _ = fs::remove_dir_all(second);
+    }
+
+    fn spawn_writer(barrier: Arc<Barrier>, path: PathBuf) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            barrier.wait();
+            fs::write(path, "native event\n").expect("write watched file");
+        })
+    }
+
+    fn temporary_directory(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("flux-{label}-{unique}"));
+        fs::create_dir_all(&path).expect("temporary directory");
+        path
     }
 }
