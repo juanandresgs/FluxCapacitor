@@ -2,12 +2,17 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::{Command, Output},
-    sync::mpsc::{self, Receiver},
+    sync::mpsc::{self, Receiver, TryRecvError},
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+
+use crate::{
+    model::{IntegrityEvent, IntegrityLevel},
+    watcher::integrity_from_notify_error,
+};
 
 const EVENT_QUIET_PERIOD: Duration = Duration::from_millis(120);
 
@@ -18,12 +23,38 @@ struct RepoSnapshot {
     subject: Option<String>,
     parent_count: usize,
     branches: HashMap<String, String>,
+    tags: HashMap<String, String>,
+    remotes: HashMap<String, String>,
+    stash: Option<String>,
+    operation: Option<GitOperation>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GitOperation {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+    Bisect,
+}
+
+impl GitOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Rebase => "rebase",
+            Self::CherryPick => "cherry-pick",
+            Self::Revert => "revert",
+            Self::Bisect => "bisect",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 struct Repository {
     root: PathBuf,
     git_dir: PathBuf,
+    common_dir: PathBuf,
     snapshot: RepoSnapshot,
     dirty_since: Option<Instant>,
 }
@@ -39,6 +70,12 @@ pub struct GitMonitor {
     repositories: Vec<Repository>,
     receiver: Receiver<notify::Result<Event>>,
     _watcher: RecommendedWatcher,
+    disconnected_reported: bool,
+}
+
+pub enum GitMonitorEvent {
+    Activity(GitActivity),
+    Integrity(IntegrityEvent),
 }
 
 impl GitMonitor {
@@ -65,15 +102,28 @@ impl GitMonitor {
                 else {
                     continue;
                 };
+                let common_dir =
+                    git_common_dir(&repository_root).unwrap_or_else(|| git_dir.clone());
                 watcher
                     .watch(&git_dir, RecursiveMode::Recursive)
                     .with_context(|| {
                         format!("failed to watch Git metadata at {}", git_dir.display())
                     })?;
+                if common_dir != git_dir {
+                    watcher
+                        .watch(&common_dir, RecursiveMode::Recursive)
+                        .with_context(|| {
+                            format!(
+                                "failed to watch shared Git metadata at {}",
+                                common_dir.display()
+                            )
+                        })?;
+                }
                 repositories.push(Repository {
-                    snapshot: read_snapshot(&repository_root),
+                    snapshot: read_snapshot(&repository_root, &git_dir),
                     root: repository_root,
                     git_dir,
+                    common_dir,
                     dirty_since: None,
                 });
             }
@@ -83,22 +133,70 @@ impl GitMonitor {
             repositories,
             receiver,
             _watcher: watcher,
+            disconnected_reported: false,
         })
     }
 
-    pub fn drain(&mut self) -> Vec<GitActivity> {
-        while let Ok(result) = self.receiver.try_recv() {
-            let Ok(event) = result else {
-                continue;
-            };
-            for repository in &mut self.repositories {
-                if event.paths.is_empty()
-                    || event
-                        .paths
-                        .iter()
-                        .any(|path| path.starts_with(&repository.git_dir))
-                {
-                    repository.dirty_since = Some(Instant::now());
+    pub fn drain(&mut self) -> Vec<GitMonitorEvent> {
+        let mut output = Vec::new();
+        loop {
+            match self.receiver.try_recv() {
+                Ok(Ok(event)) => {
+                    if event.need_rescan() {
+                        output.push(GitMonitorEvent::Integrity(IntegrityEvent {
+                            level: IntegrityLevel::Uncertain,
+                            source: "git",
+                            summary: "native Git events may have been lost".into(),
+                            detail: event
+                                .info()
+                                .unwrap_or("the operating system requested a reconciliation scan")
+                                .into(),
+                            root: self
+                                .repositories
+                                .first()
+                                .map(|repository| repository.root.clone())
+                                .unwrap_or_default(),
+                        }));
+                        continue;
+                    }
+                    for repository in &mut self.repositories {
+                        if event.paths.is_empty()
+                            || event.paths.iter().any(|path| {
+                                path.starts_with(&repository.git_dir)
+                                    || path.starts_with(&repository.common_dir)
+                            })
+                        {
+                            repository.dirty_since = Some(Instant::now());
+                        }
+                    }
+                }
+                Ok(Err(error)) => {
+                    let fallback = self
+                        .repositories
+                        .first()
+                        .map(|repository| repository.root.as_path())
+                        .unwrap_or_else(|| Path::new("."));
+                    output.push(GitMonitorEvent::Integrity(integrity_from_notify_error(
+                        "git", error, fallback,
+                    )));
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if !self.disconnected_reported {
+                        self.disconnected_reported = true;
+                        output.push(GitMonitorEvent::Integrity(IntegrityEvent {
+                            level: IntegrityLevel::Lost,
+                            source: "git",
+                            summary: "event channel disconnected".into(),
+                            detail: "Git metadata changes are no longer observable".into(),
+                            root: self
+                                .repositories
+                                .first()
+                                .map(|repository| repository.root.clone())
+                                .unwrap_or_default(),
+                        }));
+                    }
+                    break;
                 }
             }
         }
@@ -112,7 +210,7 @@ impl GitMonitor {
                 continue;
             }
             repository.dirty_since = None;
-            let current = read_snapshot(&repository.root);
+            let current = read_snapshot(&repository.root, &repository.git_dir);
             classify_changes(
                 &repository.root,
                 &repository.snapshot,
@@ -121,15 +219,118 @@ impl GitMonitor {
             );
             repository.snapshot = current;
         }
-        activities
+        output.extend(activities.into_iter().map(GitMonitorEvent::Activity));
+        output
+    }
+
+    pub fn observe_workspace_event(&mut self, event: &Event) -> Vec<GitMonitorEvent> {
+        let mut output = Vec::new();
+        for candidate in event
+            .paths
+            .iter()
+            .filter_map(|path| worktree_from_git_path(path))
+        {
+            if self
+                .repositories
+                .iter()
+                .any(|repository| repository.root == candidate)
+            {
+                continue;
+            }
+            let Some(repository_root) = git_output(&candidate, &["rev-parse", "--show-toplevel"])
+                .and_then(|result| successful_text(&result))
+                .map(PathBuf::from)
+            else {
+                continue;
+            };
+            if self
+                .repositories
+                .iter()
+                .any(|repository| repository.root == repository_root)
+            {
+                continue;
+            }
+            let Some(git_dir) =
+                command_text(&repository_root, &["rev-parse", "--absolute-git-dir"])
+                    .map(PathBuf::from)
+            else {
+                continue;
+            };
+            let common_dir = git_common_dir(&repository_root).unwrap_or_else(|| git_dir.clone());
+            match self._watcher.watch(&git_dir, RecursiveMode::Recursive) {
+                Ok(()) => {
+                    if common_dir != git_dir
+                        && let Err(error) =
+                            self._watcher.watch(&common_dir, RecursiveMode::Recursive)
+                    {
+                        output.push(GitMonitorEvent::Integrity(integrity_from_notify_error(
+                            "git",
+                            error,
+                            &repository_root,
+                        )));
+                        continue;
+                    }
+                    self.repositories.push(Repository {
+                        snapshot: read_snapshot(&repository_root, &git_dir),
+                        root: repository_root.clone(),
+                        git_dir: git_dir.clone(),
+                        common_dir,
+                        dirty_since: None,
+                    });
+                    output.push(GitMonitorEvent::Activity(GitActivity {
+                        root: repository_root,
+                        summary: "repository initialized".into(),
+                        detail: format!("watching {}", git_dir.display()),
+                    }));
+                }
+                Err(error) => output.push(GitMonitorEvent::Integrity(integrity_from_notify_error(
+                    "git",
+                    error,
+                    &repository_root,
+                ))),
+            }
+        }
+        output
     }
 
     pub fn repository_count(&self) -> usize {
         self.repositories.len()
     }
+
+    pub fn established_events(&self) -> Vec<IntegrityEvent> {
+        self.repositories
+            .iter()
+            .map(|repository| IntegrityEvent {
+                level: IntegrityLevel::Info,
+                source: "git",
+                summary: "metadata watch established".into(),
+                detail: format!("watching {}", repository.git_dir.display()),
+                root: repository.root.clone(),
+            })
+            .collect()
+    }
 }
 
-fn read_snapshot(root: &Path) -> RepoSnapshot {
+fn worktree_from_git_path(path: &Path) -> Option<PathBuf> {
+    let mut worktree = PathBuf::new();
+    for component in path.components() {
+        if component.as_os_str() == ".git" {
+            return Some(worktree);
+        }
+        worktree.push(component.as_os_str());
+    }
+    None
+}
+
+fn git_common_dir(root: &Path) -> Option<PathBuf> {
+    command_text(
+        root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .map(PathBuf::from)
+}
+
+fn read_snapshot(root: &Path, git_dir: &Path) -> RepoSnapshot {
     let head = command_text(root, &["rev-parse", "--verify", "HEAD"]);
     let branch = command_text(root, &["symbolic-ref", "--short", "-q", "HEAD"]);
     let (subject, parent_count) = command_text(root, &["show", "-s", "--format=%s%x00%P", "HEAD"])
@@ -145,12 +346,35 @@ fn read_snapshot(root: &Path) -> RepoSnapshot {
         })
         .map_or((None, 0), |(subject, count)| (Some(subject), count));
 
-    let branches = command_text(
+    let branches = read_refs(root, "refs/heads");
+    let tags = read_refs(root, "refs/tags");
+    let remotes = read_refs(root, "refs/remotes")
+        .into_iter()
+        .filter(|(name, _)| !name.ends_with("/HEAD"))
+        .collect();
+    let stash = command_text(root, &["rev-parse", "--verify", "refs/stash"]);
+    let operation = read_operation(git_dir);
+
+    RepoSnapshot {
+        head,
+        branch,
+        subject,
+        parent_count,
+        branches,
+        tags,
+        remotes,
+        stash,
+        operation,
+    }
+}
+
+fn read_refs(root: &Path, namespace: &str) -> HashMap<String, String> {
+    command_text(
         root,
         &[
             "for-each-ref",
             "--format=%(refname:short)%00%(objectname)",
-            "refs/heads",
+            namespace,
         ],
     )
     .map(|output| {
@@ -162,14 +386,22 @@ fn read_snapshot(root: &Path) -> RepoSnapshot {
             })
             .collect()
     })
-    .unwrap_or_default();
+    .unwrap_or_default()
+}
 
-    RepoSnapshot {
-        head,
-        branch,
-        subject,
-        parent_count,
-        branches,
+fn read_operation(git_dir: &Path) -> Option<GitOperation> {
+    if git_dir.join("MERGE_HEAD").exists() {
+        Some(GitOperation::Merge)
+    } else if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+        Some(GitOperation::Rebase)
+    } else if git_dir.join("CHERRY_PICK_HEAD").exists() {
+        Some(GitOperation::CherryPick)
+    } else if git_dir.join("REVERT_HEAD").exists() {
+        Some(GitOperation::Revert)
+    } else if git_dir.join("BISECT_START").exists() {
+        Some(GitOperation::Bisect)
+    } else {
+        None
     }
 }
 
@@ -179,6 +411,32 @@ fn classify_changes(
     current: &RepoSnapshot,
     activities: &mut Vec<GitActivity>,
 ) {
+    match (previous.operation, current.operation) {
+        (None, Some(operation)) => activities.push(activity(
+            root,
+            format!("{} started", operation.label()),
+            "Git operation state appeared".into(),
+        )),
+        (Some(operation), None) => activities.push(activity(
+            root,
+            format!("{} ended", operation.label()),
+            "Git operation state disappeared".into(),
+        )),
+        (Some(previous), Some(current)) if previous != current => {
+            activities.push(activity(
+                root,
+                format!("{} ended", previous.label()),
+                "Git operation state changed".into(),
+            ));
+            activities.push(activity(
+                root,
+                format!("{} started", current.label()),
+                "Git operation state changed".into(),
+            ));
+        }
+        _ => {}
+    }
+
     if previous.branch != current.branch {
         let from = previous.branch.as_deref().unwrap_or("detached HEAD");
         let to = current.branch.as_deref().unwrap_or("detached HEAD");
@@ -223,6 +481,82 @@ fn classify_changes(
                 root,
                 format!("branch deleted: {branch}"),
                 "local branch".into(),
+            ));
+        }
+    }
+
+    for (branch, object) in &current.branches {
+        if previous
+            .branches
+            .get(branch)
+            .is_some_and(|previous_object| previous_object != object)
+            && Some(branch) != current.branch.as_ref()
+        {
+            activities.push(activity(
+                root,
+                format!("branch updated: {branch}"),
+                format!("now at {}", short_oid(object)),
+            ));
+        }
+    }
+
+    classify_ref_changes(root, "tag", &previous.tags, &current.tags, activities);
+    classify_ref_changes(
+        root,
+        "remote ref",
+        &previous.remotes,
+        &current.remotes,
+        activities,
+    );
+
+    match (&previous.stash, &current.stash) {
+        (None, Some(object)) => activities.push(activity(
+            root,
+            "stash created".into(),
+            format!("refs/stash at {}", short_oid(object)),
+        )),
+        (Some(_), None) => activities.push(activity(
+            root,
+            "stash deleted".into(),
+            "refs/stash removed".into(),
+        )),
+        (Some(previous), Some(current)) if previous != current => activities.push(activity(
+            root,
+            "stash updated".into(),
+            format!("refs/stash now at {}", short_oid(current)),
+        )),
+        _ => {}
+    }
+}
+
+fn classify_ref_changes(
+    root: &Path,
+    label: &str,
+    previous: &HashMap<String, String>,
+    current: &HashMap<String, String>,
+    activities: &mut Vec<GitActivity>,
+) {
+    for (name, object) in current {
+        match previous.get(name) {
+            None => activities.push(activity(
+                root,
+                format!("{label} created: {name}"),
+                format!("points to {}", short_oid(object)),
+            )),
+            Some(previous_object) if previous_object != object => activities.push(activity(
+                root,
+                format!("{label} updated: {name}"),
+                format!("now at {}", short_oid(object)),
+            )),
+            _ => {}
+        }
+    }
+    for name in previous.keys() {
+        if !current.contains_key(name) {
+            activities.push(activity(
+                root,
+                format!("{label} deleted: {name}"),
+                "reference removed".into(),
             ));
         }
     }
@@ -291,6 +625,59 @@ mod tests {
     }
 
     #[test]
+    fn finds_worktree_from_git_metadata_path() {
+        assert_eq!(
+            worktree_from_git_path(Path::new("/code/project/.git/HEAD")),
+            Some(PathBuf::from("/code/project"))
+        );
+        assert_eq!(
+            worktree_from_git_path(Path::new("/code/project/src/main.rs")),
+            None
+        );
+    }
+
+    #[test]
+    fn classifies_refs_stash_and_operation_state() {
+        let root = Path::new("/workspace");
+        let mut previous = empty_snapshot();
+        let mut current = empty_snapshot();
+        current.operation = Some(GitOperation::Rebase);
+        current.tags.insert("v1.0.0".into(), "aaaaaaaa".into());
+        current
+            .remotes
+            .insert("origin/main".into(), "bbbbbbbb".into());
+        current.stash = Some("cccccccc".into());
+
+        let mut activities = Vec::new();
+        classify_changes(root, &previous, &current, &mut activities);
+        let summaries = activities
+            .iter()
+            .map(|activity| activity.summary.as_str())
+            .collect::<Vec<_>>();
+        assert!(summaries.contains(&"rebase started"));
+        assert!(summaries.contains(&"tag created: v1.0.0"));
+        assert!(summaries.contains(&"remote ref created: origin/main"));
+        assert!(summaries.contains(&"stash created"));
+
+        previous = current;
+        let mut ended = previous.clone();
+        ended.operation = None;
+        ended.tags.clear();
+        ended.remotes.clear();
+        ended.stash = None;
+        activities.clear();
+        classify_changes(root, &previous, &ended, &mut activities);
+        let summaries = activities
+            .iter()
+            .map(|activity| activity.summary.as_str())
+            .collect::<Vec<_>>();
+        assert!(summaries.contains(&"rebase ended"));
+        assert!(summaries.contains(&"tag deleted: v1.0.0"));
+        assert!(summaries.contains(&"remote ref deleted: origin/main"));
+        assert!(summaries.contains(&"stash deleted"));
+    }
+
+    #[test]
     fn native_git_event_emits_commit_activity() {
         let root = temporary_directory();
         git(&root, &["init", "-q"]);
@@ -304,12 +691,17 @@ mod tests {
         fs::write(root.join("story.txt"), "first\nsecond\n").expect("write changed file");
         git(&root, &["add", "story.txt"]);
         git(&root, &["commit", "-qm", "second commit"]);
+        git(&root, &["tag", "v-test"]);
+        git(&root, &["branch", "side"]);
 
         let deadline = Instant::now() + Duration::from_secs(4);
         let mut activities = Vec::new();
         while Instant::now() < deadline && activities.is_empty() {
             thread::sleep(Duration::from_millis(40));
-            activities.extend(monitor.drain());
+            activities.extend(monitor.drain().into_iter().filter_map(|event| match event {
+                GitMonitorEvent::Activity(activity) => Some(activity),
+                GitMonitorEvent::Integrity(_) => None,
+            }));
         }
 
         assert!(
@@ -319,6 +711,35 @@ mod tests {
                     && activity.detail == "second commit"),
             "expected commit activity, got {activities:?}"
         );
+        assert!(
+            activities
+                .iter()
+                .any(|activity| activity.summary == "tag created: v-test")
+        );
+        assert!(
+            activities
+                .iter()
+                .any(|activity| activity.summary == "branch created: side")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn repository_initialization_joins_the_native_stream() {
+        let root = temporary_directory();
+        let mut monitor = GitMonitor::discover(std::slice::from_ref(&root)).expect("Git monitor");
+        assert_eq!(monitor.repository_count(), 0);
+        git(&root, &["init", "-q"]);
+        let events = monitor.observe_workspace_event(
+            &Event::new(notify::EventKind::Create(notify::event::CreateKind::Folder))
+                .add_path(root.join(".git")),
+        );
+        assert_eq!(monitor.repository_count(), 1);
+        assert!(events.into_iter().any(|event| matches!(
+            event,
+            GitMonitorEvent::Activity(GitActivity { summary, .. })
+                if summary == "repository initialized"
+        )));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -340,5 +761,19 @@ mod tests {
         let path = std::env::temp_dir().join(format!("flux-git-events-{unique}"));
         fs::create_dir_all(&path).expect("temporary directory");
         path
+    }
+
+    fn empty_snapshot() -> RepoSnapshot {
+        RepoSnapshot {
+            head: None,
+            branch: None,
+            subject: None,
+            parent_count: 0,
+            branches: HashMap::new(),
+            tags: HashMap::new(),
+            remotes: HashMap::new(),
+            stash: None,
+            operation: None,
+        }
     }
 }

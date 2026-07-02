@@ -7,15 +7,17 @@ pub enum ChangeKind {
     Rename,
     Delete,
     Git,
+    Integrity,
 }
 
 impl ChangeKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Modify,
         Self::Create,
         Self::Rename,
         Self::Delete,
         Self::Git,
+        Self::Integrity,
     ];
 
     pub fn label(self) -> &'static str {
@@ -25,6 +27,7 @@ impl ChangeKind {
             Self::Rename => "MOVE",
             Self::Delete => "DELETE",
             Self::Git => "GIT",
+            Self::Integrity => "INTEGRITY",
         }
     }
 
@@ -35,6 +38,7 @@ impl ChangeKind {
             Self::Rename => ">",
             Self::Delete => "-",
             Self::Git => "◆",
+            Self::Integrity => "!",
         }
     }
 }
@@ -44,6 +48,44 @@ pub enum TargetKind {
     File,
     Directory,
     Repository,
+    Observer,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IntegrityLevel {
+    Info,
+    Degraded,
+    Uncertain,
+    Lost,
+}
+
+impl IntegrityLevel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Info => "INFO",
+            Self::Degraded => "DEGRADED",
+            Self::Uncertain => "UNCERTAIN",
+            Self::Lost => "LOST",
+        }
+    }
+
+    pub fn severity(self) -> u8 {
+        match self {
+            Self::Info => 0,
+            Self::Degraded => 1,
+            Self::Uncertain => 2,
+            Self::Lost => 3,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct IntegrityEvent {
+    pub level: IntegrityLevel,
+    pub source: &'static str,
+    pub summary: String,
+    pub detail: String,
+    pub root: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,4 +117,5 @@ pub struct ChangeEvent {
     pub lines_removed: usize,
     pub diff: Vec<DiffLine>,
     pub detail: Option<String>,
+    pub integrity_level: Option<IntegrityLevel>,
 }

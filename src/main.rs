@@ -7,6 +7,7 @@ mod watcher;
 use std::{
     io::{self, stdout},
     path::PathBuf,
+    sync::mpsc::TryRecvError,
     time::Duration,
 };
 
@@ -18,7 +19,8 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use git::GitMonitor;
+use git::{GitMonitor, GitMonitorEvent};
+use model::{IntegrityEvent, IntegrityLevel};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use watcher::WatchState;
 
@@ -44,6 +46,12 @@ fn main() -> Result<()> {
     let mut watcher = WatchState::start(paths)?;
     let mut git_monitor = GitMonitor::discover(&watcher.roots)?;
     let mut app = App::new(cli.max_events.max(1));
+    for event in watcher.established_events() {
+        app.process_integrity(event);
+    }
+    for event in git_monitor.established_events() {
+        app.process_integrity(event);
+    }
 
     install_panic_hook();
     enable_raw_mode().context("failed to enter raw terminal mode")?;
@@ -62,15 +70,50 @@ fn run(
     watcher: &mut WatchState,
     git_monitor: &mut GitMonitor,
 ) -> Result<()> {
+    let mut filesystem_disconnected = false;
     while !app.should_quit {
-        while let Ok(result) = watcher.receiver.try_recv() {
-            match result {
-                Ok(event) => app.process_notify(watcher, event),
-                Err(error) => app.status = Some(format!("watch error: {error}")),
+        loop {
+            match watcher.receiver.try_recv() {
+                Ok(Ok(event)) => {
+                    for git_event in git_monitor.observe_workspace_event(&event) {
+                        match git_event {
+                            GitMonitorEvent::Activity(activity) => app.process_git(activity),
+                            GitMonitorEvent::Integrity(integrity) => {
+                                app.process_integrity(integrity)
+                            }
+                        }
+                    }
+                    app.process_notify(watcher, event);
+                }
+                Ok(Err(error)) => {
+                    let fallback = watcher.roots.first().cloned().unwrap_or_default();
+                    app.process_integrity(watcher::integrity_from_notify_error(
+                        "filesystem",
+                        error,
+                        &fallback,
+                    ));
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if !filesystem_disconnected {
+                        filesystem_disconnected = true;
+                        app.process_integrity(IntegrityEvent {
+                            level: IntegrityLevel::Lost,
+                            source: "filesystem",
+                            summary: "event channel disconnected".into(),
+                            detail: "filesystem changes are no longer observable".into(),
+                            root: watcher.roots.first().cloned().unwrap_or_default(),
+                        });
+                    }
+                    break;
+                }
             }
         }
-        for activity in git_monitor.drain() {
-            app.process_git(activity);
+        for event in git_monitor.drain() {
+            match event {
+                GitMonitorEvent::Activity(activity) => app.process_git(activity),
+                GitMonitorEvent::Integrity(integrity) => app.process_integrity(integrity),
+            }
         }
         app.flush_pending(watcher);
         terminal.draw(|frame| ui::draw(frame, app, watcher, git_monitor.repository_count()))?;
@@ -123,6 +166,7 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('3') => app.toggle_kind(2),
         KeyCode::Char('4') => app.toggle_kind(3),
         KeyCode::Char('5') => app.toggle_kind(4),
+        KeyCode::Char('6') => app.toggle_kind(5),
         _ => {}
     }
 }

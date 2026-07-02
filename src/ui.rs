@@ -65,17 +65,24 @@ fn draw_header(
         .map(|root| compact_path(root))
         .collect::<Vec<_>>()
         .join("  ·  ");
+    let observer_level = app.observer_level();
     let live = if app.paused {
         format!(" PAUSED  +{} queued ", app.paused_events.len())
+    } else if observer_level != crate::model::IntegrityLevel::Info {
+        format!(" {} ", observer_level.label())
     } else {
         " ● LIVE ".to_string()
     };
-    let live_color = if app.paused { AMBER } else { GREEN };
+    let live_color = if app.paused {
+        AMBER
+    } else {
+        integrity_color(observer_level)
+    };
 
     let title = Line::from(vec![
         Span::styled(" ϟ ", Style::default().fg(Color::Black).bg(GREEN).bold()),
         Span::styled(" FLUX ", Style::default().fg(Color::White).bold()),
-        Span::styled("filesystem activity", Style::default().fg(MUTED)),
+        Span::styled("workspace activity", Style::default().fg(MUTED)),
         Span::raw("  "),
         Span::styled(roots, Style::default().fg(Color::Rgb(155, 155, 160))),
         Span::styled(
@@ -177,12 +184,12 @@ fn timeline_item(event: &ChangeEvent, selected: bool) -> ListItem<'static> {
     ListItem::new(Line::from(vec![
         Span::styled(
             prefix,
-            Style::default().fg(kind_color(event.kind)).bg(background),
+            Style::default().fg(event_color(event)).bg(background),
         ),
         Span::styled(
             format!(" {} ", event.kind.symbol()),
             Style::default()
-                .fg(kind_color(event.kind))
+                .fg(event_color(event))
                 .bg(background)
                 .bold(),
         ),
@@ -211,7 +218,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             ),
             Line::from(""),
             Line::styled(
-                "Creates, edits, moves, and deletes appear here.",
+                "File, Git, and observer-integrity events appear here.",
                 Style::default().fg(DIM),
             ),
         ]))
@@ -226,6 +233,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
         TargetKind::Directory => "directory",
         TargetKind::Repository => "repository",
         TargetKind::File => "file",
+        TargetKind::Observer => "observer",
     };
     let mut lines = vec![
         Line::from(vec![
@@ -233,12 +241,19 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
                 format!(" {} ", event.kind.label()),
                 Style::default()
                     .fg(Color::Black)
-                    .bg(kind_color(event.kind))
+                    .bg(event_color(event))
                     .bold(),
             ),
             Span::styled(
                 format!("  {target}  #{}", event.id),
                 Style::default().fg(MUTED),
+            ),
+            Span::styled(
+                event
+                    .integrity_level
+                    .map(|level| format!("  {}", level.label()))
+                    .unwrap_or_default(),
+                Style::default().fg(event_color(event)).bold(),
             ),
         ]),
         Line::styled(
@@ -261,6 +276,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             ChangeKind::Delete => "removed from the workspace",
             ChangeKind::Rename => "moved without textual changes",
             ChangeKind::Git => "repository state changed",
+            ChangeKind::Integrity => "observation state changed",
             _ if event.target == TargetKind::Directory => "directory event",
             _ => "metadata changed",
         });
@@ -335,7 +351,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 hint(" move  "),
                 key("/"),
                 hint(" find  "),
-                key("1-5"),
+                key("1-6"),
                 hint(" types  "),
                 key("spc"),
                 hint(" pause  "),
@@ -348,7 +364,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 hint(" move  "),
                 key("/"),
                 hint(" search  "),
-                key("1-5"),
+                key("1-6"),
                 hint(" filters  "),
                 key("space"),
                 hint(" pause  "),
@@ -424,6 +440,23 @@ fn kind_color(kind: ChangeKind) -> Color {
         ChangeKind::Rename => BLUE,
         ChangeKind::Delete => RED,
         ChangeKind::Git => Color::Rgb(196, 143, 255),
+        ChangeKind::Integrity => Color::Rgb(255, 109, 109),
+    }
+}
+
+fn event_color(event: &ChangeEvent) -> Color {
+    event
+        .integrity_level
+        .map(integrity_color)
+        .unwrap_or_else(|| kind_color(event.kind))
+}
+
+fn integrity_color(level: crate::model::IntegrityLevel) -> Color {
+    match level {
+        crate::model::IntegrityLevel::Info => GREEN,
+        crate::model::IntegrityLevel::Degraded => AMBER,
+        crate::model::IntegrityLevel::Uncertain => Color::Rgb(255, 145, 85),
+        crate::model::IntegrityLevel::Lost => RED,
     }
 }
 

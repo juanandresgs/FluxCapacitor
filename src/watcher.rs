@@ -6,11 +6,11 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{ErrorKind, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use similar::{ChangeTag, TextDiff};
 use walkdir::{DirEntry, WalkDir};
 
-use crate::model::{DiffKind, DiffLine};
+use crate::model::{DiffKind, DiffLine, IntegrityEvent, IntegrityLevel};
 
 const MAX_TEXT_BYTES: u64 = 1024 * 1024;
 const MAX_DIFF_LINES: usize = 300;
@@ -20,6 +20,7 @@ pub struct Snapshot {
     pub content: Option<String>,
     pub size: u64,
     pub is_dir: bool,
+    pub read_error: Option<String>,
 }
 
 pub struct WatchState {
@@ -89,11 +90,69 @@ impl WatchState {
             content: None,
             size: 0,
             is_dir: path.is_dir(),
+            read_error: None,
         })
     }
 
     pub fn previous_snapshot(&self, path: &Path) -> Option<&Snapshot> {
         self.snapshots.get(path)
+    }
+
+    pub fn is_root(&self, path: &Path) -> bool {
+        self.roots.iter().any(|root| root == path)
+    }
+
+    pub fn established_events(&self) -> Vec<IntegrityEvent> {
+        self.roots
+            .iter()
+            .map(|root| IntegrityEvent {
+                level: IntegrityLevel::Info,
+                source: "filesystem",
+                summary: "watch established".into(),
+                detail: "native recursive filesystem events are active".into(),
+                root: root.clone(),
+            })
+            .collect()
+    }
+}
+
+pub fn integrity_from_notify_error(
+    source: &'static str,
+    error: notify::Error,
+    fallback_root: &Path,
+) -> IntegrityEvent {
+    let root = error
+        .paths
+        .first()
+        .cloned()
+        .unwrap_or_else(|| fallback_root.to_path_buf());
+    let description = error.to_string();
+    let description_lower = description.to_lowercase();
+    let (level, summary) = match error.kind {
+        ErrorKind::MaxFilesWatch => (IntegrityLevel::Lost, "native watch limit reached"),
+        ErrorKind::PathNotFound | ErrorKind::WatchNotFound => {
+            (IntegrityLevel::Lost, "watch target unavailable")
+        }
+        ErrorKind::Generic(_)
+            if description_lower.contains("overflow")
+                || description_lower.contains("dropped")
+                || description_lower.contains("rescan") =>
+        {
+            (
+                IntegrityLevel::Uncertain,
+                "native events may have been lost",
+            )
+        }
+        ErrorKind::Io(_) | ErrorKind::Generic(_) | ErrorKind::InvalidConfig(_) => {
+            (IntegrityLevel::Degraded, "native watcher reported an error")
+        }
+    };
+    IntegrityEvent {
+        level,
+        source,
+        summary: summary.into(),
+        detail: description,
+        root,
     }
 }
 
@@ -115,6 +174,7 @@ pub fn read_snapshot(path: &Path) -> Snapshot {
             content: None,
             size: 0,
             is_dir: false,
+            read_error: Some(format!("could not read metadata for {}", path.display())),
         };
     };
 
@@ -123,6 +183,7 @@ pub fn read_snapshot(path: &Path) -> Snapshot {
             content: None,
             size: 0,
             is_dir: true,
+            read_error: None,
         };
     }
 
@@ -131,21 +192,24 @@ pub fn read_snapshot(path: &Path) -> Snapshot {
             content: None,
             size: metadata.len(),
             is_dir: false,
+            read_error: None,
         };
     }
 
-    let content = fs::read(path).ok().and_then(|bytes| {
-        if bytes.iter().take(8192).any(|byte| *byte == 0) {
-            None
-        } else {
-            String::from_utf8(bytes).ok()
-        }
-    });
+    let (content, read_error) = match fs::read(path) {
+        Ok(bytes) if bytes.iter().take(8192).any(|byte| *byte == 0) => (None, None),
+        Ok(bytes) => (String::from_utf8(bytes).ok(), None),
+        Err(error) => (
+            None,
+            Some(format!("could not read {}: {error}", path.display())),
+        ),
+    };
 
     Snapshot {
         content,
         size: metadata.len(),
         is_dir: false,
+        read_error,
     }
 }
 
@@ -214,6 +278,8 @@ fn ignored_entry(entry: &DirEntry) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use notify::Error;
+
     use super::*;
 
     #[test]
@@ -234,5 +300,16 @@ mod tests {
         assert!(ignored(Path::new("project/target/debug/app")));
         assert!(!ignored(Path::new("project/.github/workflows/check.yml")));
         assert!(!ignored(Path::new("project/src/main.rs")));
+    }
+
+    #[test]
+    fn maps_overflow_errors_to_uncertain_integrity() {
+        let event = integrity_from_notify_error(
+            "filesystem",
+            Error::generic("event queue overflow; rescan required"),
+            Path::new("/workspace"),
+        );
+        assert_eq!(event.level, IntegrityLevel::Uncertain);
+        assert_eq!(event.summary, "native events may have been lost");
     }
 }
