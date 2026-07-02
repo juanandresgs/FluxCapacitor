@@ -10,6 +10,7 @@ use notify::{
 };
 
 use crate::{
+    git::GitActivity,
     model::{ChangeEvent, ChangeKind, TargetKind},
     watcher::{Snapshot, WatchState, build_diff, ignored},
 };
@@ -25,7 +26,7 @@ pub struct App {
     pub should_quit: bool,
     pub search: String,
     pub search_mode: bool,
-    pub enabled: [bool; 4],
+    pub enabled: [bool; 5],
     pub status: Option<String>,
     pub max_events: usize,
     next_id: u64,
@@ -43,7 +44,7 @@ impl App {
             should_quit: false,
             search: String::new(),
             search_mode: false,
-            enabled: [true; 4],
+            enabled: [true; 5],
             status: None,
             max_events,
             next_id: 1,
@@ -154,6 +155,29 @@ impl App {
                 }
             }
             EventKind::Access(_) | EventKind::Other | EventKind::Any => {}
+        }
+    }
+
+    pub fn process_git(&mut self, activity: GitActivity) {
+        let event = ChangeEvent {
+            id: self.next_id,
+            kind: ChangeKind::Git,
+            target: TargetKind::Repository,
+            path: PathBuf::from(activity.summary),
+            previous_path: None,
+            root: activity.root,
+            occurred_at: Instant::now(),
+            size: 0,
+            lines_added: 0,
+            lines_removed: 0,
+            diff: Vec::new(),
+            detail: Some(activity.detail),
+        };
+        self.next_id += 1;
+        if self.paused {
+            self.paused_events.push_front(event);
+        } else {
+            self.push_event(event);
         }
     }
 

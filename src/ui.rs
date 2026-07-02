@@ -22,7 +22,7 @@ const MUTED: Color = Color::Rgb(112, 112, 120);
 const DIM: Color = Color::Rgb(70, 70, 77);
 const PANEL: Color = Color::Rgb(18, 18, 21);
 
-pub fn draw(frame: &mut Frame, app: &App, watcher: &WatchState) {
+pub fn draw(frame: &mut Frame, app: &App, watcher: &WatchState, git_repositories: usize) {
     let area = frame.area();
     let layout = Layout::vertical([
         Constraint::Length(3),
@@ -32,7 +32,7 @@ pub fn draw(frame: &mut Frame, app: &App, watcher: &WatchState) {
     ])
     .split(area);
 
-    draw_header(frame, layout[0], app, watcher);
+    draw_header(frame, layout[0], app, watcher, git_repositories);
     draw_filters(frame, layout[1], app);
 
     if area.width >= 100 {
@@ -52,7 +52,13 @@ pub fn draw(frame: &mut Frame, app: &App, watcher: &WatchState) {
     draw_footer(frame, layout[3], app);
 }
 
-fn draw_header(frame: &mut Frame, area: Rect, app: &App, watcher: &WatchState) {
+fn draw_header(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    watcher: &WatchState,
+    git_repositories: usize,
+) {
     let roots = watcher
         .roots
         .iter()
@@ -72,6 +78,10 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, watcher: &WatchState) {
         Span::styled("filesystem activity", Style::default().fg(MUTED)),
         Span::raw("  "),
         Span::styled(roots, Style::default().fg(Color::Rgb(155, 155, 160))),
+        Span::styled(
+            format!("  {git_repositories} git"),
+            Style::default().fg(BLUE),
+        ),
     ]);
     let status = Line::from(Span::styled(
         live.clone(),
@@ -212,10 +222,10 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let root = compact_path(&event.root);
-    let target = if event.target == TargetKind::Directory {
-        "directory"
-    } else {
-        "file"
+    let target = match event.target {
+        TargetKind::Directory => "directory",
+        TargetKind::Repository => "repository",
+        TargetKind::File => "file",
     };
     let mut lines = vec![
         Line::from(vec![
@@ -250,6 +260,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
         let detail = event.detail.as_deref().unwrap_or(match event.kind {
             ChangeKind::Delete => "removed from the workspace",
             ChangeKind::Rename => "moved without textual changes",
+            ChangeKind::Git => "repository state changed",
             _ if event.target == TargetKind::Directory => "directory event",
             _ => "metadata changed",
         });
@@ -324,7 +335,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 hint(" move  "),
                 key("/"),
                 hint(" find  "),
-                key("1-4"),
+                key("1-5"),
                 hint(" types  "),
                 key("spc"),
                 hint(" pause  "),
@@ -337,7 +348,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 hint(" move  "),
                 key("/"),
                 hint(" search  "),
-                key("1-4"),
+                key("1-5"),
                 hint(" filters  "),
                 key("space"),
                 hint(" pause  "),
@@ -412,6 +423,7 @@ fn kind_color(kind: ChangeKind) -> Color {
         ChangeKind::Modify => AMBER,
         ChangeKind::Rename => BLUE,
         ChangeKind::Delete => RED,
+        ChangeKind::Git => Color::Rgb(196, 143, 255),
     }
 }
 

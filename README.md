@@ -28,7 +28,7 @@ cargo run --release
 | --- | --- |
 | `j` / `k`, arrows | Move through the timeline |
 | `/` | Filter by path |
-| `1`–`4` | Toggle modify/create/move/delete events |
+| `1`–`5` | Toggle modify/create/move/delete/Git events |
 | `space` | Pause or resume the stream |
 | `c` | Clear the timeline |
 | `g` / `G` | Jump to newest/oldest |
@@ -40,6 +40,7 @@ cargo run --release
 - Watches several directory trees recursively using native OS events.
 - Shows line-level text diffs for files up to 1 MiB and metadata for larger or binary files.
 - Handles paired and split rename events and buffers incomplete rename events briefly.
+- Subscribes to native Git metadata events and emits commits, merge commits, checkouts, resets, history rewrites, and local branch creation/deletion without exposing raw `.git` noise.
 - Ignores `.git`, `node_modules`, `target`, `dist`, and `coverage` trees.
 - Retains 1,000 events by default; adjust with `--max-events`.
 - Stays local, emits no notifications, and restores the terminal after errors or panics.

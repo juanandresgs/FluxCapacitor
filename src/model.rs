@@ -6,10 +6,17 @@ pub enum ChangeKind {
     Modify,
     Rename,
     Delete,
+    Git,
 }
 
 impl ChangeKind {
-    pub const ALL: [Self; 4] = [Self::Modify, Self::Create, Self::Rename, Self::Delete];
+    pub const ALL: [Self; 5] = [
+        Self::Modify,
+        Self::Create,
+        Self::Rename,
+        Self::Delete,
+        Self::Git,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -17,6 +24,7 @@ impl ChangeKind {
             Self::Modify => "MODIFY",
             Self::Rename => "MOVE",
             Self::Delete => "DELETE",
+            Self::Git => "GIT",
         }
     }
 
@@ -26,6 +34,7 @@ impl ChangeKind {
             Self::Modify => "~",
             Self::Rename => ">",
             Self::Delete => "-",
+            Self::Git => "◆",
         }
     }
 }
@@ -34,6 +43,7 @@ impl ChangeKind {
 pub enum TargetKind {
     File,
     Directory,
+    Repository,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,4 +1,5 @@
 mod app;
+mod git;
 mod model;
 mod ui;
 mod watcher;
@@ -17,6 +18,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use git::GitMonitor;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use watcher::WatchState;
 
@@ -40,6 +42,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = resolve_paths(cli.paths)?;
     let mut watcher = WatchState::start(paths)?;
+    let mut git_monitor = GitMonitor::discover(&watcher.roots)?;
     let mut app = App::new(cli.max_events.max(1));
 
     install_panic_hook();
@@ -48,7 +51,7 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend).context("failed to initialize terminal")?;
 
-    let result = run(&mut terminal, &mut app, &mut watcher);
+    let result = run(&mut terminal, &mut app, &mut watcher, &mut git_monitor);
     restore_terminal(&mut terminal)?;
     result
 }
@@ -57,6 +60,7 @@ fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     watcher: &mut WatchState,
+    git_monitor: &mut GitMonitor,
 ) -> Result<()> {
     while !app.should_quit {
         while let Ok(result) = watcher.receiver.try_recv() {
@@ -65,8 +69,11 @@ fn run(
                 Err(error) => app.status = Some(format!("watch error: {error}")),
             }
         }
+        for activity in git_monitor.drain() {
+            app.process_git(activity);
+        }
         app.flush_pending(watcher);
-        terminal.draw(|frame| ui::draw(frame, app, watcher))?;
+        terminal.draw(|frame| ui::draw(frame, app, watcher, git_monitor.repository_count()))?;
 
         if event::poll(Duration::from_millis(80))?
             && let TerminalEvent::Key(key) = event::read()?
@@ -115,6 +122,7 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('2') => app.toggle_kind(1),
         KeyCode::Char('3') => app.toggle_kind(2),
         KeyCode::Char('4') => app.toggle_kind(3),
+        KeyCode::Char('5') => app.toggle_kind(4),
         _ => {}
     }
 }
