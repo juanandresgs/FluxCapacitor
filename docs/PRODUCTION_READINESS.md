@@ -16,6 +16,7 @@ The core architecture is appropriate for the product: native event streams, cons
 - `cargo audit`: no known RustSec advisories in the locked dependency graph.
 - `cargo publish --dry-run`: packages and rebuilds successfully.
 - Package size: approximately 43 KiB compressed source archive.
+- GitHub Actions: the Rust 1.88 test suite passes on current Ubuntu, macOS, and Windows runners; formatting, Clippy, and package verification pass on Ubuntu.
 - Local runtime testing: macOS on Apple Silicon.
 - Repository state at assessment: private, no tags, no releases, and no published crate.
 
@@ -24,8 +25,7 @@ The core architecture is appropriate for the product: native event streams, cons
 ### Required before public sharing
 
 1. **Make the repository public.** Installation from Git and source browsing otherwise remain unavailable to others.
-2. **Let CI pass on Linux, macOS, and Windows.** The workflow exists, but a green run is the evidence needed for cross-platform build/test claims.
-3. **Tag the first release.** Use an explicit alpha version such as `v0.1.0`; do not present it as stable.
+2. **Tag the first release.** Use an explicit alpha version such as `v0.1.0`; do not present it as stable.
 
 The missing MIT license file and Cargo release metadata were corrected during this assessment.
 
