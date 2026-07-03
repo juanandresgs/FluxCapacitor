@@ -1,95 +1,75 @@
 # Flux Capacitor
 
-`flux` is a native terminal observer for work performed inside one or more directory trees. It reports only changes supported by direct filesystem or Git metadata events—without wrapping tools, polling repository state, or guessing which process caused an action.
+`flux` is a fast terminal timeline for live filesystem and Git activity across one or more directory trees. It uses native filesystem notifications, does not wrap agent tools, and does not poll for changes.
 
-## Build and run
+> **Status:** useful alpha. Reliable for local observation on macOS; Linux and Windows support is built on cross-platform libraries and exercised in CI, but needs more real-world use before a stable claim.
+
+## Install
+
+Requires Rust 1.88 or newer. Git is optional, but required for semantic Git events.
 
 ```sh
-cargo build --release
-./target/release/flux /path/to/workspace /path/to/another-workspace
+cargo install --git https://github.com/juanandresgs/FluxCapacitor
 ```
 
-Install it on your `PATH` with:
+The repository must be public before other people can use that command. Until then, clone it and run:
 
 ```sh
+git clone https://github.com/juanandresgs/FluxCapacitor
+cd FluxCapacitor
 cargo install --path .
-flux /path/to/workspace
 ```
 
-With no paths, `flux` watches the current directory.
+## Use
 
-## Event families
+```sh
+flux                         # watch the current directory
+flux ~/code/api ~/code/web   # watch multiple directory trees
+flux --max-events 2000 .     # change in-memory retention
+```
 
-### FILE
+Flux shows one observed-order timeline. With multiple roots, every event carries a stable colored workspace label; `w` and `W` cycle workspace focus.
 
-Native events from watched directory trees:
+### Event families
 
-- File and directory creation, modification, deletion, movement, and rename
-- Contextual text diffs for readable files up to 1 MiB
-- Metadata-only events for binary, unreadable, and oversized files
-- Paired and split rename handling using native tracker IDs where available
-- Short event-burst coalescing that updates the visible event to the latest observed state
+- **FILE:** create, modify, rename/move, and delete events, with contextual diffs for readable files up to 1 MiB.
+- **GIT:** commits, merges, checkouts, resets/rewrites, branches, tags, remotes, stashes, and operation-state transitions triggered by native `.git` events.
+- **INTEGRITY:** watcher establishment, read failures, dropped-event signals, channel failures, watch exhaustion, and root removal.
 
-Flux reports the filesystem fact only. It does not identify the process, agent, command, or intent behind a change.
-
-### GIT
-
-Native events from each repository’s Git metadata directories trigger a single state comparison after a 120 ms quiet window. There is no periodic repository polling.
-
-Currently classified:
-
-- Commits and merge commits
-- Branch checkout and detached-HEAD transitions
-- Forward commits, backward resets, and divergent history rewrites
-- Local branch creation, update, and deletion
-- Tag creation, update, and deletion
-- Remote-tracking reference creation, update, and deletion
-- Stash creation, update, and deletion
-- Merge, rebase, cherry-pick, revert, and bisect state starting or ending
-- Repositories initialized while Flux is already watching
-- Linked worktree metadata and shared Git references
-
-When Git operation state disappears, Flux says the operation **ended**. It does not guess whether the operation completed or was aborted unless the resulting repository state proves a more specific transition.
-
-### INTEGRITY
-
-Events describing whether observation itself remains trustworthy:
-
-- Filesystem and Git metadata watches established
-- Native watcher errors and watch-limit failures
-- Explicit FSEvents/inotify rescan sentinels indicating dropped events
-- Filesystem or Git event-channel disconnection
-- Watched-root removal
-- Changed paths that could not be inspected
-
-Integrity levels are `INFO`, `DEGRADED`, `UNCERTAIN`, and `LOST`. An uncertainty or loss remains visible in the global status even if the event timeline is cleared. Flux does not perform a reconciliation scan, so it never claims to reconstruct an event gap.
+Flux reports observable facts. It does not infer the responsible process, agent, command, task, or intent.
 
 ## Keys
 
 | Key | Action |
 | --- | --- |
-| `j` / `k`, arrows | Move through the timeline |
-| `/` | Filter by path or summary |
-| `w` / `W` | Cycle workspace focus forward/backward (`ALL` included) |
-| `1`–`4` | Toggle FILE modify/create/move/delete actions |
-| `5` | Toggle GIT events |
-| `6` | Toggle INTEGRITY events |
-| `space` | Pause or resume the stream |
-| `c` | Clear retained timeline events |
+| `j` / `k`, arrows | Move through events |
 | `g` / `G` | Jump to newest/oldest |
+| `/` | Filter by path or summary |
+| `w` / `W` | Cycle workspace focus |
+| `1`–`6` | Toggle event categories |
+| `space` | Pause/resume the stream |
+| `c` | Clear retained events |
 | `q`, `Ctrl-C` | Quit |
 
-## Operational behavior
+## Guarantees and limits
 
-- Seeds an initial filesystem snapshot silently, so existing files do not flood the timeline.
-- Uses native recursive filesystem notifications through `notify`.
-- Keeps one observed-order timeline across roots and prefixes every event with a stable, colored workspace label.
-- Uses the shortest unique path suffix for same-named roots, such as `team/api` and `other/api`.
-- Processes filesystem activity in bounded render batches so sustained concurrent changes cannot indefinitely starve the TUI.
-- Ignores `.git`, `node_modules`, `target`, `dist`, and `coverage` in the FILE stream.
-- Observes `.git` separately through the semantic GIT pipeline.
-- Retains 1,000 events in memory by default; adjust with `--max-events`.
-- Emits no desktop notifications and sends no data elsewhere.
-- Restores the terminal after normal exit or panic.
+- Native recursive notifications feed the timeline; Git state is read only after matching metadata activity.
+- Existing files seed the initial snapshot silently.
+- Timeline history is memory-only and bounded to 1,000 events by default.
+- Native watcher backends may coalesce writes. Cross-root order is callback arrival order, not proof of causality.
+- Flux reports explicit dropped-event/rescan signals but does not reconstruct missing history.
+- Existing nested Git repositories are not discovered recursively unless supplied as watched roots.
+- Generated trees such as `.git`, `node_modules`, `target`, `dist`, and `coverage` are excluded from FILE events.
 
-See `docs/IMPLEMENTATION_STATUS.md` for the evidence-backed quality and completeness assessment.
+See [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) for the detailed evidence and limitations, and [`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md) for release readiness.
+
+## Develop
+
+```sh
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+cargo run -- .
+```
+
+Licensed under the [MIT License](LICENSE).

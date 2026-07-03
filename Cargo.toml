@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "A fast terminal timeline for live filesystem changes"
 license = "MIT"
+repository = "https://github.com/juanandresgs/FluxCapacitor"
+readme = "README.md"
+rust-version = "1.88"
+keywords = ["filesystem", "tui", "watcher", "git", "developer-tools"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "flux"
