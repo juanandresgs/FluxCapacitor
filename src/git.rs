@@ -68,6 +68,9 @@ pub struct GitActivity {
 
 pub struct GitMonitor {
     repositories: Vec<Repository>,
+    watched_metadata: HashSet<PathBuf>,
+    known_worktrees: HashSet<PathBuf>,
+    worktrees_dirty_since: HashMap<PathBuf, Instant>,
     receiver: Receiver<notify::Result<Event>>,
     _watcher: RecommendedWatcher,
     disconnected_reported: bool,
@@ -76,6 +79,7 @@ pub struct GitMonitor {
 pub enum GitMonitorEvent {
     Activity(GitActivity),
     Integrity(IntegrityEvent),
+    RelatedWorktree(PathBuf),
 }
 
 impl GitMonitor {
@@ -86,6 +90,7 @@ impl GitMonitor {
         })
         .context("failed to create Git metadata watcher")?;
         let mut seen = HashSet::new();
+        let mut watched_metadata = HashSet::new();
         let mut repositories = Vec::new();
 
         for root in roots {
@@ -104,12 +109,14 @@ impl GitMonitor {
                 };
                 let common_dir =
                     git_common_dir(&repository_root).unwrap_or_else(|| git_dir.clone());
-                watcher
-                    .watch(&git_dir, RecursiveMode::Recursive)
-                    .with_context(|| {
-                        format!("failed to watch Git metadata at {}", git_dir.display())
-                    })?;
-                if common_dir != git_dir {
+                if watched_metadata.insert(git_dir.clone()) {
+                    watcher
+                        .watch(&git_dir, RecursiveMode::Recursive)
+                        .with_context(|| {
+                            format!("failed to watch Git metadata at {}", git_dir.display())
+                        })?;
+                }
+                if watched_metadata.insert(common_dir.clone()) {
                     watcher
                         .watch(&common_dir, RecursiveMode::Recursive)
                         .with_context(|| {
@@ -130,6 +137,9 @@ impl GitMonitor {
         }
 
         Ok(Self {
+            known_worktrees: related_worktrees(roots).into_iter().collect(),
+            watched_metadata,
+            worktrees_dirty_since: HashMap::new(),
             repositories,
             receiver,
             _watcher: watcher,
@@ -167,6 +177,18 @@ impl GitMonitor {
                             })
                         {
                             repository.dirty_since = Some(Instant::now());
+                        }
+                    }
+                    for common_dir in self
+                        .repositories
+                        .iter()
+                        .map(|repository| &repository.common_dir)
+                    {
+                        if event.paths.is_empty()
+                            || event.paths.iter().any(|path| path.starts_with(common_dir))
+                        {
+                            self.worktrees_dirty_since
+                                .insert(common_dir.clone(), Instant::now());
                         }
                     }
                 }
@@ -220,6 +242,77 @@ impl GitMonitor {
             repository.snapshot = current;
         }
         output.extend(activities.into_iter().map(GitMonitorEvent::Activity));
+        let ready = self
+            .worktrees_dirty_since
+            .iter()
+            .filter(|(_, changed)| changed.elapsed() >= EVENT_QUIET_PERIOD)
+            .map(|(common_dir, _)| common_dir.clone())
+            .collect::<Vec<_>>();
+        for common_dir in ready {
+            self.worktrees_dirty_since.remove(&common_dir);
+            let Some(root) = self
+                .repositories
+                .iter()
+                .find(|repository| repository.common_dir == common_dir)
+                .map(|repository| repository.root.clone())
+            else {
+                continue;
+            };
+            for worktree in worktrees_for_root(&root) {
+                if self.known_worktrees.insert(worktree.clone()) {
+                    output.push(GitMonitorEvent::RelatedWorktree(worktree));
+                }
+            }
+        }
+        output
+    }
+
+    pub fn add_root(&mut self, root: &Path) -> Vec<GitMonitorEvent> {
+        let mut output = Vec::new();
+        let Some(repository_root) = git_output(root, &["rev-parse", "--show-toplevel"])
+            .and_then(|result| successful_text(&result))
+            .map(PathBuf::from)
+        else {
+            return output;
+        };
+        if self
+            .repositories
+            .iter()
+            .any(|repository| repository.root == repository_root)
+        {
+            return output;
+        }
+        let Some(git_dir) =
+            command_text(&repository_root, &["rev-parse", "--absolute-git-dir"]).map(PathBuf::from)
+        else {
+            return output;
+        };
+        let common_dir = git_common_dir(&repository_root).unwrap_or_else(|| git_dir.clone());
+        for metadata in [&git_dir, &common_dir] {
+            if self.watched_metadata.insert(metadata.clone())
+                && let Err(error) = self._watcher.watch(metadata, RecursiveMode::Recursive)
+            {
+                self.watched_metadata.remove(metadata);
+                output.push(GitMonitorEvent::Integrity(integrity_from_notify_error(
+                    "git",
+                    error,
+                    &repository_root,
+                )));
+                return output;
+            }
+        }
+        self.repositories.push(Repository {
+            snapshot: read_snapshot(&repository_root, &git_dir),
+            root: repository_root.clone(),
+            git_dir,
+            common_dir,
+            dirty_since: None,
+        });
+        output.push(GitMonitorEvent::Activity(GitActivity {
+            root: repository_root,
+            summary: "linked worktree joined".into(),
+            detail: "discovered from native Git worktree metadata".into(),
+        }));
         output
     }
 
@@ -309,6 +402,31 @@ impl GitMonitor {
             })
             .collect()
     }
+}
+
+pub fn related_worktrees(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut worktrees = Vec::new();
+    for root in roots {
+        for worktree in worktrees_for_root(root) {
+            if !worktrees.contains(&worktree) {
+                worktrees.push(worktree);
+            }
+        }
+    }
+    worktrees
+}
+
+fn worktrees_for_root(root: &Path) -> Vec<PathBuf> {
+    command_text(root, &["worktree", "list", "--porcelain"])
+        .map(|output| {
+            output
+                .lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn worktree_from_git_path(path: &Path) -> Option<PathBuf> {
@@ -700,7 +818,7 @@ mod tests {
             thread::sleep(Duration::from_millis(40));
             activities.extend(monitor.drain().into_iter().filter_map(|event| match event {
                 GitMonitorEvent::Activity(activity) => Some(activity),
-                GitMonitorEvent::Integrity(_) => None,
+                GitMonitorEvent::Integrity(_) | GitMonitorEvent::RelatedWorktree(_) => None,
             }));
         }
 
@@ -740,6 +858,45 @@ mod tests {
             GitMonitorEvent::Activity(GitActivity { summary, .. })
                 if summary == "repository initialized"
         )));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn linked_worktree_joins_from_native_git_metadata() {
+        let root = temporary_directory();
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.name", "Flux Test"]);
+        git(&root, &["config", "user.email", "flux@example.invalid"]);
+        fs::write(root.join("story.txt"), "initial\n").expect("write initial file");
+        git(&root, &["add", "story.txt"]);
+        git(&root, &["commit", "-qm", "initial"]);
+        let linked = root.with_extension("linked");
+        let mut monitor = GitMonitor::discover(std::slice::from_ref(&root)).expect("Git monitor");
+
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature/native-related",
+                linked.to_str().expect("linked path"),
+            ],
+        );
+        let linked = linked.canonicalize().expect("canonical linked worktree");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut discovered = false;
+        while Instant::now() < deadline && !discovered {
+            thread::sleep(Duration::from_millis(40));
+            discovered = monitor.drain().into_iter().any(
+                |event| matches!(event, GitMonitorEvent::RelatedWorktree(path) if path == linked),
+            );
+        }
+
+        assert!(discovered, "linked worktree was not discovered natively");
+        let _ = fs::remove_dir_all(linked);
         let _ = fs::remove_dir_all(root);
     }
 

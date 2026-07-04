@@ -14,7 +14,7 @@ It is not yet appropriate to describe the timeline as a complete forensic record
 | FILE | Strong alpha | Main operations and diffs work; boundary moves and complex directory renames need more platform testing |
 | GIT | Good alpha | Broad semantic ref/state coverage; some repository layouts and ambiguous operation outcomes remain intentionally limited |
 | INTEGRITY | Good foundation | Explicit rescan, error, channel, root-loss, and read-failure reporting; no automatic recovery or reconciliation |
-| Tests | Moderate | Twenty deterministic tests including concurrent native multi-root activity, real native Git commit/ref events, and macOS-imprecise rename shapes; platform matrix remains narrow |
+| Tests | Moderate | Twenty-two deterministic tests including runtime linked-worktree discovery, dynamic root registration, concurrent native multi-root activity, real native Git commit/ref events, and macOS-imprecise rename shapes; platform matrix remains narrow |
 | Portability | Unproven beyond macOS | Built on cross-platform crates, but runtime behavior has only been exercised locally on macOS |
 | Persistence | Not implemented | Timeline is intentionally process-local and memory-only |
 
@@ -27,6 +27,7 @@ It is not yet appropriate to describe the timeline as a complete forensic record
 - INTEGRITY severity remains separate from the event-family badge so the category and observer state are both immediately visible.
 - With multiple roots, every timeline row and preview carries the same stable, colored workspace label. Same-named roots use their shortest unique path suffix.
 - `w` and `W` cycle a workspace focus without changing the retained global timeline or its observed order.
+- The tracked-folder list lives in a bottom drawer toggled with `t`, leaving the header focused on health and aggregate scope.
 - Filesystem intake is capped at 512 events per render pass; `CATCHING UP` appears while Flux yields to keep interaction and drawing responsive under sustained activity.
 - The same hierarchy is used in stacked 80-column and split-pane wide layouts.
 
@@ -88,6 +89,7 @@ This is event-triggered debouncing, not periodic state polling.
 - Stash creation, update, and deletion through `refs/stash`.
 - Merge, rebase, cherry-pick, revert, and bisect state start/end.
 - Repository initialization detected from native `.git` creation events.
+- Existing linked worktrees join the filesystem roots at startup. New linked worktrees join after native common-Git-directory activity triggers one debounced `git worktree list --porcelain` read.
 - Git metadata watcher errors and rescan sentinels forwarded to INTEGRITY.
 
 ### Deliberate certainty rules
@@ -100,7 +102,7 @@ This is event-triggered debouncing, not periodic state polling.
 ### Known limitations
 
 - Git must be installed and executable because event-triggered classification uses read-only Git commands.
-- Pre-existing nested repositories are not recursively discovered at startup unless explicitly supplied as watched roots. Repositories initialized after startup are detected.
+- Pre-existing nested repositories and unrelated clones are not recursively discovered unless explicitly supplied as watched roots. Linked worktrees are discovered through their shared Git metadata.
 - Bare repositories are not currently supported because discovery relies on `--show-toplevel`.
 - Reflog-only activity that leaves all tracked state unchanged produces no semantic event.
 - Git notes, replace refs, bisect progress steps, and arbitrary custom refs are not classified.
@@ -159,11 +161,13 @@ The current automated suite covers:
 18. Deepest-root attribution for overlapping roots.
 19. Workspace focus cycling and filtering without timeline reordering.
 20. Concurrent native filesystem events arriving from two watched roots.
+21. A real linked worktree created after monitor startup joining from native Git metadata activity.
+22. A dynamically added filesystem root receiving native events without restarting Flux.
 
 ## Recommended next hardening work
 
 1. Add Linux and Windows CI/runtime tests for watcher event shapes.
-2. Add linked-worktree integration tests rather than relying only on normal-repository native tests.
+2. Add linked-worktree removal and replacement tests, including stale administrative metadata.
 3. Remap descendant snapshots atomically for directory-tree renames.
 4. Add per-root integrity state and explicit watch-recovery support without claiming gap reconstruction.
 5. Add configurable ignore patterns and retention settings.

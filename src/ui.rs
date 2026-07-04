@@ -36,10 +36,16 @@ const WORKSPACE_COLORS: [Color; 8] = [
 
 pub fn draw(frame: &mut Frame, app: &App, watcher: &WatchState, git_repositories: usize) {
     let area = frame.area();
+    let folders_height = if app.folders_open {
+        watcher.roots.len().min(5) as u16 + 2
+    } else {
+        0
+    };
     let layout = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(3),
         Constraint::Min(10),
+        Constraint::Length(folders_height),
         Constraint::Length(if app.search_mode { 3 } else { 2 }),
     ])
     .split(area);
@@ -61,7 +67,10 @@ pub fn draw(frame: &mut Frame, app: &App, watcher: &WatchState, git_repositories
         draw_detail(frame, body[1], app, watcher);
     }
 
-    draw_footer(frame, layout[3], app);
+    if app.folders_open {
+        draw_tracked_folders(frame, layout[3], watcher);
+    }
+    draw_footer(frame, layout[4], app);
 }
 
 fn draw_header(
@@ -71,16 +80,6 @@ fn draw_header(
     watcher: &WatchState,
     git_repositories: usize,
 ) {
-    let roots = if watcher.roots.len() > 2 {
-        format!("{} workspaces", watcher.roots.len())
-    } else {
-        watcher
-            .roots
-            .iter()
-            .map(|root| compact_path(root))
-            .collect::<Vec<_>>()
-            .join("  ·  ")
-    };
     let observer_level = app.observer_level();
     let live = if app.paused {
         format!(" PAUSED  +{} queued ", app.paused_events.len())
@@ -102,10 +101,12 @@ fn draw_header(
         Span::styled(" FLUX ", Style::default().fg(Color::White).bold()),
         Span::styled("workspace activity", Style::default().fg(MUTED)),
         Span::raw("  "),
-        Span::styled(roots, Style::default().fg(Color::Rgb(155, 155, 160))),
         Span::styled(
-            format!("  {git_repositories} git"),
-            Style::default().fg(BLUE),
+            format!(
+                "{} folders  ·  {git_repositories} repos",
+                watcher.roots.len()
+            ),
+            Style::default().fg(Color::Rgb(155, 155, 160)),
         ),
     ]);
     let status = Line::from(Span::styled(
@@ -121,6 +122,39 @@ fn draw_header(
     .split(area);
     frame.render_widget(Paragraph::new(title).block(bottom_border()), columns[0]);
     frame.render_widget(Paragraph::new(status).block(bottom_border()), columns[1]);
+}
+
+fn draw_tracked_folders(frame: &mut Frame, area: Rect, watcher: &WatchState) {
+    let lines = watcher
+        .roots
+        .iter()
+        .take(5)
+        .enumerate()
+        .map(|(index, root)| {
+            Line::from(vec![
+                workspace_span(&watcher.root_label(root), index),
+                Span::raw("  "),
+                Span::styled(root.display().to_string(), Style::default().fg(MUTED)),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let hidden = watcher.roots.len().saturating_sub(lines.len());
+    let title = if hidden == 0 {
+        " TRACKED FOLDERS  ·  t hide ".to_string()
+    } else {
+        format!(" TRACKED FOLDERS  ·  +{hidden} more  ·  t hide ")
+    };
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).block(
+            Block::new()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(DIM))
+                .padding(Padding::horizontal(1))
+                .style(Style::default().bg(PANEL)),
+        ),
+        area,
+    );
 }
 
 fn draw_filters(frame: &mut Frame, area: Rect, app: &App, watcher: &WatchState) {
@@ -490,6 +524,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 hint(" root  "),
                 key("1-6"),
                 hint(" types  "),
+                key("t"),
+                hint(" folders  "),
                 key("spc"),
                 hint(" pause  "),
                 key("q"),
@@ -505,6 +541,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 hint(" workspace  "),
                 key("1-6"),
                 hint(" filters  "),
+                key("t"),
+                hint(" folders  "),
                 key("space"),
                 hint(" pause  "),
                 key("c"),

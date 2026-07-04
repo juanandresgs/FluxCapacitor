@@ -119,6 +119,28 @@ impl WatchState {
             .unwrap_or(0)
     }
 
+    pub fn add_root(&mut self, root: PathBuf) -> Result<Option<IntegrityEvent>> {
+        let root = root
+            .canonicalize()
+            .with_context(|| format!("cannot access related folder {}", root.display()))?;
+        if self.roots.contains(&root) {
+            return Ok(None);
+        }
+        self._watcher
+            .watch(&root, RecursiveMode::Recursive)
+            .with_context(|| format!("failed to watch related folder {}", root.display()))?;
+        seed_snapshots(&root, &mut self.snapshots);
+        self.roots.push(root.clone());
+        self.root_labels = build_root_labels(&self.roots);
+        Ok(Some(IntegrityEvent {
+            level: IntegrityLevel::Info,
+            source: "filesystem",
+            summary: "related folder joined".into(),
+            detail: "native recursive filesystem events are active".into(),
+            root,
+        }))
+    }
+
     pub fn established_events(&self) -> Vec<IntegrityEvent> {
         self.roots
             .iter()
@@ -418,6 +440,41 @@ mod tests {
         second_writer.join().expect("second writer");
         assert!(saw_first, "first root did not produce a native event");
         assert!(saw_second, "second root did not produce a native event");
+        let _ = fs::remove_dir_all(first);
+        let _ = fs::remove_dir_all(second);
+    }
+
+    #[test]
+    fn dynamically_added_root_receives_native_events() {
+        let first = temporary_directory("dynamic-first")
+            .canonicalize()
+            .expect("canonical first root");
+        let second = temporary_directory("dynamic-second")
+            .canonicalize()
+            .expect("canonical second root");
+        let mut state = WatchState::start(vec![first.clone()]).expect("watch state");
+        assert!(
+            state
+                .add_root(second.clone())
+                .expect("add related root")
+                .is_some()
+        );
+
+        fs::write(second.join("joined.txt"), "joined dynamically\n").expect("write joined file");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut observed = false;
+        while Instant::now() < deadline && !observed {
+            let Ok(result) = state.receiver.recv_timeout(Duration::from_millis(250)) else {
+                continue;
+            };
+            observed = result
+                .expect("native event")
+                .paths
+                .iter()
+                .any(|path| path.starts_with(&second));
+        }
+
+        assert!(observed, "dynamically added root produced no native event");
         let _ = fs::remove_dir_all(first);
         let _ = fs::remove_dir_all(second);
     }

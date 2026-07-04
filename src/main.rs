@@ -44,7 +44,7 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let paths = resolve_paths(cli.paths)?;
+    let paths = expand_related_paths(resolve_paths(cli.paths)?);
     let mut watcher = WatchState::start(paths)?;
     let mut git_monitor = GitMonitor::discover(&watcher.roots)?;
     let mut app = App::new(cli.max_events.max(1));
@@ -84,12 +84,7 @@ fn run(
                 Ok(Ok(event)) => {
                     filesystem_events += 1;
                     for git_event in git_monitor.observe_workspace_event(&event) {
-                        match git_event {
-                            GitMonitorEvent::Activity(activity) => app.process_git(activity),
-                            GitMonitorEvent::Integrity(integrity) => {
-                                app.process_integrity(integrity)
-                            }
-                        }
+                        process_git_monitor_event(app, watcher, git_monitor, git_event);
                     }
                     app.process_notify(watcher, event);
                 }
@@ -121,10 +116,7 @@ fn run(
             }
         }
         for event in git_monitor.drain() {
-            match event {
-                GitMonitorEvent::Activity(activity) => app.process_git(activity),
-                GitMonitorEvent::Integrity(integrity) => app.process_integrity(integrity),
-            }
+            process_git_monitor_event(app, watcher, git_monitor, event);
         }
         app.flush_pending(watcher);
         terminal.draw(|frame| ui::draw(frame, app, watcher, git_monitor.repository_count()))?;
@@ -180,8 +172,53 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers, roots: &[Pa
         KeyCode::Char('6') => app.toggle_kind(5),
         KeyCode::Char('w') => app.cycle_workspace(roots, false),
         KeyCode::Char('W') => app.cycle_workspace(roots, true),
+        KeyCode::Char('t') => app.folders_open = !app.folders_open,
         _ => {}
     }
+}
+
+fn process_git_monitor_event(
+    app: &mut App,
+    watcher: &mut WatchState,
+    git_monitor: &mut GitMonitor,
+    event: GitMonitorEvent,
+) {
+    match event {
+        GitMonitorEvent::Activity(activity) => app.process_git(activity),
+        GitMonitorEvent::Integrity(integrity) => app.process_integrity(integrity),
+        GitMonitorEvent::RelatedWorktree(root) => match watcher.add_root(root.clone()) {
+            Ok(Some(integrity)) => {
+                app.process_integrity(integrity);
+                for event in git_monitor.add_root(&root) {
+                    match event {
+                        GitMonitorEvent::Activity(activity) => app.process_git(activity),
+                        GitMonitorEvent::Integrity(integrity) => app.process_integrity(integrity),
+                        GitMonitorEvent::RelatedWorktree(_) => {}
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => app.process_integrity(IntegrityEvent {
+                level: IntegrityLevel::Lost,
+                source: "filesystem",
+                summary: "related folder could not join".into(),
+                detail: error.to_string(),
+                root,
+            }),
+        },
+    }
+}
+
+fn expand_related_paths(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    for path in git::related_worktrees(&paths) {
+        let Ok(path) = path.canonicalize() else {
+            continue;
+        };
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
 }
 
 fn resolve_paths(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
