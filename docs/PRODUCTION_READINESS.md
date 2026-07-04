@@ -10,7 +10,7 @@ The core architecture is appropriate for the product: native event streams, cons
 
 ## Evidence
 
-- `cargo test --locked`: 22 tests pass locally, including runtime linked-worktree discovery, dynamic native root registration, and real multi-root filesystem and Git activity.
+- `cargo test --locked`: 25 tests pass locally, including runtime linked-worktree discovery, submodule checkout resolution, incremental-baseline honesty, dynamic native root registration, and real multi-root filesystem and Git activity.
 - `cargo clippy --locked --all-targets -- -D warnings`: passes.
 - `cargo fmt --check`: passes.
 - `cargo audit`: no known RustSec advisories in the locked dependency graph.

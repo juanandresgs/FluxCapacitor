@@ -8,12 +8,15 @@ use std::{
 use anyhow::{Context, Result};
 use notify::{ErrorKind, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use similar::{ChangeTag, TextDiff};
-use walkdir::{DirEntry, WalkDir};
+use walkdir::{DirEntry, FilterEntry, IntoIter, WalkDir};
 
 use crate::model::{DiffKind, DiffLine, IntegrityEvent, IntegrityLevel};
 
 const MAX_TEXT_BYTES: u64 = 1024 * 1024;
 const MAX_DIFF_LINES: usize = 300;
+const INITIAL_SEED_BUDGET: usize = 2048;
+
+type SnapshotSeeder = FilterEntry<IntoIter, fn(&DirEntry) -> bool>;
 
 #[derive(Clone, Debug)]
 pub struct Snapshot {
@@ -28,6 +31,7 @@ pub struct WatchState {
     root_labels: HashMap<PathBuf, String>,
     pub snapshots: HashMap<PathBuf, Snapshot>,
     pub receiver: Receiver<notify::Result<Event>>,
+    seeders: Vec<SnapshotSeeder>,
     _watcher: RecommendedWatcher,
 }
 
@@ -46,22 +50,26 @@ impl WatchState {
         })
         .context("failed to create filesystem watcher")?;
 
-        let mut snapshots = HashMap::new();
-        for root in &roots {
+        let snapshots = HashMap::new();
+        let mut seeders = Vec::new();
+        for root in minimal_observation_roots(&roots) {
             watcher
-                .watch(root, RecursiveMode::Recursive)
+                .watch(&root, RecursiveMode::Recursive)
                 .with_context(|| format!("failed to watch {}", root.display()))?;
-            seed_snapshots(root, &mut snapshots);
+            seeders.push(snapshot_seeder(&root));
         }
 
         let root_labels = build_root_labels(&roots);
-        Ok(Self {
+        let mut state = Self {
             roots,
             root_labels,
             snapshots,
             receiver,
+            seeders,
             _watcher: watcher,
-        })
+        };
+        state.seed_step(INITIAL_SEED_BUDGET);
+        Ok(state)
     }
 
     pub fn root_for(&self, path: &Path) -> PathBuf {
@@ -126,10 +134,12 @@ impl WatchState {
         if self.roots.contains(&root) {
             return Ok(None);
         }
-        self._watcher
-            .watch(&root, RecursiveMode::Recursive)
-            .with_context(|| format!("failed to watch related folder {}", root.display()))?;
-        seed_snapshots(&root, &mut self.snapshots);
+        if !self.roots.iter().any(|existing| root.starts_with(existing)) {
+            self._watcher
+                .watch(&root, RecursiveMode::Recursive)
+                .with_context(|| format!("failed to watch related folder {}", root.display()))?;
+            self.seeders.push(snapshot_seeder(&root));
+        }
         self.roots.push(root.clone());
         self.root_labels = build_root_labels(&self.roots);
         Ok(Some(IntegrityEvent {
@@ -139,6 +149,34 @@ impl WatchState {
             detail: "native recursive filesystem events are active".into(),
             root,
         }))
+    }
+
+    pub fn seed_step(&mut self, budget: usize) -> usize {
+        let mut processed = 0;
+        while processed < budget {
+            let Some(seeder) = self.seeders.last_mut() else {
+                break;
+            };
+            match seeder.next() {
+                Some(Ok(entry)) => {
+                    processed += 1;
+                    let path = entry.path();
+                    if path.exists() && !self.snapshots.contains_key(path) {
+                        self.snapshots
+                            .insert(path.to_path_buf(), read_snapshot(path));
+                    }
+                }
+                Some(Err(_)) => processed += 1,
+                None => {
+                    self.seeders.pop();
+                }
+            }
+        }
+        processed
+    }
+
+    pub fn is_seeding(&self) -> bool {
+        !self.seeders.is_empty()
     }
 
     pub fn established_events(&self) -> Vec<IntegrityEvent> {
@@ -153,6 +191,18 @@ impl WatchState {
             })
             .collect()
     }
+}
+
+fn minimal_observation_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots
+        .iter()
+        .filter(|root| {
+            !roots
+                .iter()
+                .any(|candidate| candidate != *root && root.starts_with(candidate))
+        })
+        .cloned()
+        .collect()
 }
 
 fn build_root_labels(roots: &[PathBuf]) -> HashMap<PathBuf, String> {
@@ -328,14 +378,14 @@ pub fn build_diff(previous: Option<&str>, current: Option<&str>) -> DiffResult {
     }
 }
 
-fn seed_snapshots(root: &Path, snapshots: &mut HashMap<PathBuf, Snapshot>) {
-    for entry in WalkDir::new(root)
+fn snapshot_seeder(root: &Path) -> SnapshotSeeder {
+    WalkDir::new(root)
         .into_iter()
-        .filter_entry(|entry| !ignored_entry(entry))
-        .filter_map(Result::ok)
-    {
-        snapshots.insert(entry.path().to_path_buf(), read_snapshot(entry.path()));
-    }
+        .filter_entry(included_entry as fn(&DirEntry) -> bool)
+}
+
+fn included_entry(entry: &DirEntry) -> bool {
+    !ignored_entry(entry)
 }
 
 fn ignored_entry(entry: &DirEntry) -> bool {
@@ -407,6 +457,17 @@ mod tests {
         let mut state = state;
         state.roots = vec![parent, child.clone()];
         assert_eq!(state.root_for(&child.join("src/main.rs")), child);
+    }
+
+    #[test]
+    fn nested_workspaces_share_the_minimal_physical_watch_root() {
+        let parent = PathBuf::from("/work/project");
+        let child = parent.join("worktrees/feature");
+        let sibling = PathBuf::from("/work/other");
+        assert_eq!(
+            minimal_observation_roots(&[child, sibling.clone(), parent.clone()]),
+            vec![sibling, parent]
+        );
     }
 
     #[test]

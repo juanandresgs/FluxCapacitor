@@ -57,7 +57,8 @@ Flux reports observable facts. It does not infer the responsible process, agent,
 ## Guarantees and limits
 
 - Native recursive notifications feed the timeline; Git state is read only after matching metadata activity.
-- Existing files seed the initial snapshot silently.
+- Existing files seed the initial snapshot silently. Large trees finish baselining incrementally after the live TUI appears.
+- Events remain live during baselining. If a file changes before its prior content is captured, Flux reports current metadata and explicitly says the baseline was unavailable rather than inventing a diff.
 - Timeline history is memory-only and bounded to 1,000 events by default.
 - Native watcher backends may coalesce writes. Cross-root order is callback arrival order, not proof of causality.
 - Flux reports explicit dropped-event/rescan signals but does not reconstruct missing history.

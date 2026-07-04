@@ -14,7 +14,7 @@ It is not yet appropriate to describe the timeline as a complete forensic record
 | FILE | Strong alpha | Main operations and diffs work; boundary moves and complex directory renames need more platform testing |
 | GIT | Good alpha | Broad semantic ref/state coverage; some repository layouts and ambiguous operation outcomes remain intentionally limited |
 | INTEGRITY | Good foundation | Explicit rescan, error, channel, root-loss, and read-failure reporting; no automatic recovery or reconciliation |
-| Tests | Moderate | Twenty-two deterministic tests including runtime linked-worktree discovery, dynamic root registration, concurrent native multi-root activity, real native Git commit/ref events, and macOS-imprecise rename shapes; platform matrix remains narrow |
+| Tests | Moderate | Twenty-five deterministic tests including runtime linked-worktree discovery, submodule checkout resolution, dynamic root registration, pre-baseline event honesty, concurrent native multi-root activity, real native Git commit/ref events, and macOS-imprecise rename shapes; platform matrix remains narrow |
 | Portability | Unproven beyond macOS | Built on cross-platform crates, but runtime behavior has only been exercised locally on macOS |
 | Persistence | Not implemented | Timeline is intentionally process-local and memory-only |
 
@@ -38,6 +38,9 @@ It is not yet appropriate to describe the timeline as a complete forensic record
 - Recursive native watching for multiple roots.
 - Deepest-root ownership for overlapping roots, so a path is attributed to the most specific configured workspace.
 - Silent initial snapshots.
+- A 2,048-entry baseline is captured before entering the TUI; larger trees continue incrementally at up to 1,024 entries per render loop while native events remain active.
+- Changes observed before a file's baseline exists are reported without a fabricated diff and carry an explicit baseline-unavailable detail.
+- Nested logical workspaces share the minimum set of physical recursive watches instead of duplicating parent/child observation.
 - File and directory create, modify, remove, and rename events.
 - Paired rename events and split rename events.
 - Native rename tracker IDs are used to avoid mispairing concurrent split renames.
@@ -163,6 +166,9 @@ The current automated suite covers:
 20. Concurrent native filesystem events arriving from two watched roots.
 21. A real linked worktree created after monitor startup joining from native Git metadata activity.
 22. A dynamically added filesystem root receiving native events without restarting Flux.
+23. Administrative Git paths resolving back to their actual working-tree checkout.
+24. Nested logical workspaces reducing to minimal physical observation roots.
+25. A modification arriving before baseline capture receiving an explicit no-baseline explanation.
 
 ## Recommended next hardening work
 

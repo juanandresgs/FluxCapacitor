@@ -85,12 +85,14 @@ fn draw_header(
         format!(" PAUSED  +{} queued ", app.paused_events.len())
     } else if app.catching_up {
         " CATCHING UP ".to_string()
+    } else if watcher.is_seeding() {
+        " ● LIVE · BASELINING ".to_string()
     } else if observer_level != crate::model::IntegrityLevel::Info {
         format!(" {} ", observer_level.label())
     } else {
         " ● LIVE ".to_string()
     };
-    let live_color = if app.paused || app.catching_up {
+    let live_color = if app.paused || app.catching_up || watcher.is_seeding() {
         AMBER
     } else {
         integrity_color(observer_level)

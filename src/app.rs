@@ -380,12 +380,21 @@ impl App {
         if current.is_dir {
             return;
         }
-        let diff = build_diff(
-            previous
-                .as_ref()
-                .and_then(|snapshot| snapshot.content.as_deref()),
-            current.content.as_deref(),
-        );
+        let diff = if previous.is_some() {
+            build_diff(
+                previous
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.content.as_deref()),
+                current.content.as_deref(),
+            )
+        } else {
+            crate::watcher::DiffResult {
+                lines: Vec::new(),
+                added: 0,
+                removed: 0,
+                detail: Some("baseline not yet available; showing current metadata".into()),
+            }
+        };
         if diff.added == 0
             && diff.removed == 0
             && previous
@@ -686,6 +695,28 @@ mod tests {
         assert_eq!(file_events.len(), 1);
         assert_eq!(file_events[0].kind, ChangeKind::Create);
         assert_eq!(file_events[0].size, 8);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn modification_without_baseline_is_labeled_honestly() {
+        let root = temporary_directory("unseeded-modify");
+        let path = root.join("late.txt");
+        let mut watcher = WatchState::start(vec![root.clone()]).expect("watch state");
+        let mut app = App::new(20);
+        fs::write(&path, "changed before baseline\n").expect("write file");
+
+        app.process_notify(
+            &mut watcher,
+            Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content))).add_path(path),
+        );
+
+        let event = app.events.front().expect("modify event");
+        assert_eq!(event.kind, ChangeKind::Modify);
+        assert_eq!(
+            event.detail.as_deref(),
+            Some("baseline not yet available; showing current metadata")
+        );
         let _ = fs::remove_dir_all(root);
     }
 

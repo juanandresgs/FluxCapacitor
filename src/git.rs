@@ -424,6 +424,9 @@ fn worktrees_for_root(root: &Path) -> Vec<PathBuf> {
                 .filter_map(|line| line.strip_prefix("worktree "))
                 .map(PathBuf::from)
                 .filter(|path| path.is_dir())
+                .filter_map(|path| {
+                    command_text(&path, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
+                })
                 .map(|path| path.canonicalize().unwrap_or(path))
                 .collect()
         })
@@ -900,6 +903,28 @@ mod tests {
         assert!(discovered, "linked worktree was not discovered natively");
         let _ = fs::remove_dir_all(linked);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn administrative_git_path_resolves_to_working_tree() {
+        let container = temporary_directory();
+        let checkout = container.join("checkout");
+        let admin = container.join("admin");
+        fs::create_dir_all(&checkout).expect("checkout directory");
+        let status = Command::new("git")
+            .args(["init", "-q", "--separate-git-dir"])
+            .arg(&admin)
+            .arg(&checkout)
+            .status()
+            .expect("initialize separate git directory");
+        assert!(status.success());
+        git(&admin, &["config", "core.worktree", "../checkout"]);
+
+        let checkout = checkout.canonicalize().expect("canonical checkout");
+        let worktrees = related_worktrees(std::slice::from_ref(&checkout));
+        assert_eq!(worktrees, vec![checkout]);
+        assert!(!worktrees.contains(&admin));
+        let _ = fs::remove_dir_all(container);
     }
 
     fn git(root: &Path, arguments: &[&str]) {

@@ -25,6 +25,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use watcher::WatchState;
 
 const MAX_FILESYSTEM_EVENTS_PER_TICK: usize = 512;
+const MAX_BASELINE_ENTRIES_PER_TICK: usize = 1024;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -115,6 +116,7 @@ fn run(
                 }
             }
         }
+        watcher.seed_step(MAX_BASELINE_ENTRIES_PER_TICK);
         for event in git_monitor.drain() {
             process_git_monitor_event(app, watcher, git_monitor, event);
         }
