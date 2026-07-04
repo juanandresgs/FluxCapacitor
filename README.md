@@ -4,6 +4,12 @@
 
 > **Status:** useful alpha. Reliable for local observation on macOS; Linux and Windows support is built on cross-platform libraries and exercised in CI, but needs more real-world use before a stable claim.
 
+## Demo
+
+![Flux following a newly created Git worktree and showing live file and Git events](assets/demo.gif)
+
+[Download the MP4](assets/demo.mp4) · Reproduce it with `vhs assets/demo.tape`
+
 ## Install
 
 Requires Rust 1.88 or newer. Git is optional, but required for semantic Git events.
