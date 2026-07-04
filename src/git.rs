@@ -424,6 +424,7 @@ fn worktrees_for_root(root: &Path) -> Vec<PathBuf> {
                 .filter_map(|line| line.strip_prefix("worktree "))
                 .map(PathBuf::from)
                 .filter(|path| path.is_dir())
+                .map(|path| path.canonicalize().unwrap_or(path))
                 .collect()
         })
         .unwrap_or_default()
