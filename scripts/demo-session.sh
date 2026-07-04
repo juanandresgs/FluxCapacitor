@@ -49,12 +49,22 @@ SOURCE
   git -C "$linked" commit -qm "add express checkout"
 }
 
+run() {
+  prepare
+  (
+    sleep 14
+    kill -INT "$$" 2>/dev/null || true
+  ) &
+  exec env -u NO_COLOR flux "$main"
+}
+
 case "${1:-}" in
   prepare) prepare ;;
   produce) produce ;;
   cleanup) cleanup ;;
+  run) run ;;
   *)
-    echo "usage: $0 {prepare|cleanup}" >&2
+    echo "usage: $0 {prepare|produce|cleanup|run}" >&2
     exit 2
     ;;
 esac
