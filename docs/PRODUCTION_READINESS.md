@@ -1,12 +1,12 @@
 # Production Readiness
 
-Assessment date: July 3, 2026
+Assessment date: July 4, 2026
 
 ## Verdict
 
 Flux is ready to share publicly as an **alpha developer tool**, not as a production-grade audit trail or stable cross-platform utility.
 
-The core architecture is appropriate for the product: native event streams, conservative classification, bounded retained history, explicit integrity events, and no unsupported agent/process attribution. Local macOS behavior is strong. The main readiness gaps are release engineering, platform evidence, overload behavior, and recovery—not the basic interaction model.
+The core architecture is appropriate for the product: native event streams, conservative classification, bounded retained history, explicit integrity events, and no unsupported agent/process attribution. Local macOS behavior is strong. Automated release packaging is in place. The main readiness gaps are platform evidence, overload behavior, and recovery—not the basic interaction model.
 
 ## Evidence
 
@@ -18,16 +18,16 @@ The core architecture is appropriate for the product: native event streams, cons
 - Package size: approximately 43 KiB compressed source archive.
 - GitHub Actions: the Rust 1.88 test suite passes on current Ubuntu, macOS, and Windows runners; formatting, Clippy, and package verification pass on Ubuntu.
 - Local runtime testing: macOS on Apple Silicon.
-- Repository state at assessment: private, no tags, no releases, and no published crate.
+- Repository state at assessment: public, with tag-triggered cross-platform release automation configured; no release tag has been published yet.
 
 ## Release gates
 
-### Required before public sharing
+### Required before advertising binary installation
 
-1. **Make the repository public.** Installation from Git and source browsing otherwise remain unavailable to others.
-2. **Tag the first release.** Use an explicit alpha version such as `v0.1.0`; do not present it as stable.
+1. **Tag the first release.** Use `v0.1.0` and keep the project explicitly labeled alpha.
+2. **Verify the release artifacts.** Install the generated macOS, Linux, and Windows archives on their native platforms and verify the shell, PowerShell, and Homebrew paths.
 
-The missing MIT license file and Cargo release metadata were corrected during this assessment.
+The public repository, MIT license, Cargo metadata, changelog, release workflow, installer generation, checksums, and Homebrew tap are in place.
 
 ### Required before calling it production-ready
 
@@ -38,11 +38,11 @@ The missing MIT license file and Cargo release metadata were corrected during th
 5. **Terminal cleanup:** panic and normal exits restore the terminal, but termination signals and failures between raw-mode activation and terminal construction are not comprehensively guarded.
 6. **Release compatibility policy:** document supported OS versions and test a declared minimum Rust version before promising one beyond the dependency-derived Rust 1.88 floor.
 
-## Distribution recommendation
+## Distribution
 
-### Now: Git install
+### Available now: Git install
 
-After making the repository public, this is immediately available with no release infrastructure:
+This remains available before the first tagged release:
 
 ```sh
 cargo install --git https://github.com/juanandresgs/FluxCapacitor
@@ -50,29 +50,23 @@ cargo install --git https://github.com/juanandresgs/FluxCapacitor
 
 It is suitable for early testers but not reproducible unless users pin `--rev` or install from a tag.
 
-### First lightweight release: crates.io
+### Prepared for `v0.1.0`
 
-Recommended. The package already passes Cargo's dry-run verification, and users would install it with:
+Pushing a matching version tag runs the generated `dist` workflow and publishes:
 
-```sh
-cargo install flux-capacitor
-```
+- Native archives for Apple Silicon and Intel macOS, x86-64 and ARM64 Linux, and x86-64 Windows.
+- SHA-256 checksums and a unified checksum manifest.
+- Shell and PowerShell installers hosted on the GitHub release.
+- A generated `flux` formula published to `juanandresgs/homebrew-tap`.
 
-The package name is `flux-capacitor`; the installed binary is `flux`. Publishing requires a public repository, crates.io ownership/login, a release tag, and a one-time `cargo publish`. Add a changelog only when releases become recurring work.
+The generated Homebrew formula installs the release archives rather than compiling Rust source. The tap is intentionally personal rather than `homebrew/core` while Flux remains an alpha.
 
-### Optional: GitHub release binaries
-
-Useful if non-Rust users ask for installation. A tag-triggered workflow can build archives for macOS, Linux, and Windows. This is more maintenance than crates.io because target coverage, archive naming, checksums, and runtime testing become release responsibilities.
-
-### Not now: Homebrew
-
-Do not pursue `homebrew/core`: the project has no stable public release, user adoption, or broad platform evidence. A personal tap is possible, but it adds a separate repository/formula and ongoing checksum/version maintenance. That violates the “no uplift unless worthwhile” preference while `cargo install` is already viable.
+Publishing to crates.io remains optional; it is no longer required to give non-Rust users a low-friction installation path.
 
 ## Recommended sequence
 
-1. Push the license, metadata, README, and CI changes.
-2. Make the GitHub repository public.
-3. Confirm the three-OS CI matrix is green.
-4. Tag `v0.1.0` as an alpha release.
-5. Publish to crates.io only if a low-friction installer is wanted.
-6. Gather external usage before investing in Homebrew or binary releases.
+1. Review and push the sparse README and generated release configuration.
+2. Confirm CI and the release workflow's pull-request plan are green.
+3. Tag `v0.1.0` as an alpha release.
+4. Test each published installation path on its native platform.
+5. Gather external usage before expanding platform promises or pursuing `homebrew/core`.

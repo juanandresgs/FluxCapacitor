@@ -2,7 +2,8 @@
 name = "flux-capacitor"
 version = "0.1.0"
 edition = "2024"
-description = "A fast terminal timeline for live filesystem changes"
+description = "Watch coding agents change your projects in real time"
+homepage = "https://github.com/juanandresgs/FluxCapacitor"
 license = "MIT"
 repository = "https://github.com/juanandresgs/FluxCapacitor"
 readme = "README.md"
@@ -14,6 +15,9 @@ categories = ["command-line-utilities", "development-tools"]
 name = "flux"
 path = "src/main.rs"
 
+[package.metadata.dist]
+formula = "flux"
+
 [dependencies]
 anyhow = "1.0.103"
 clap = { version = "4.6.1", features = ["derive"] }
@@ -22,3 +26,8 @@ notify = "8.2.0"
 ratatui = "0.30.2"
 similar = "3.1.1"
 walkdir = "2.5.0"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
