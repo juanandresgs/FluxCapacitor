@@ -872,6 +872,7 @@ mod tests {
         git(&root, &["commit", "-qm", "initial"]);
         let linked = root.with_extension("linked");
         let mut monitor = GitMonitor::discover(std::slice::from_ref(&root)).expect("Git monitor");
+        thread::sleep(Duration::from_millis(250));
 
         git(
             &root,
