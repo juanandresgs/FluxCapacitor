@@ -565,7 +565,7 @@ mod tests {
     fn flux_project_store_is_a_live_integration_fixture_when_present() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let metadata = root.join(".beads/metadata.json");
-        if !metadata.is_file() {
+        if !metadata.is_file() || !root.join(".beads/embeddeddolt").is_dir() {
             return;
         }
         let store = open_store(&root, &metadata).expect("open Flux Beads store");
@@ -598,7 +598,9 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .canonicalize()
             .expect("canonical Flux root");
-        if !root.join(".beads/metadata.json").is_file() {
+        if !root.join(".beads/metadata.json").is_file()
+            || !root.join(".beads/embeddeddolt").is_dir()
+        {
             return;
         }
         let watcher = WatchState::start(vec![root.clone()]).expect("start native watcher");
