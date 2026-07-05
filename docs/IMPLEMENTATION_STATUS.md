@@ -1,10 +1,10 @@
 # Implementation Status
 
-Assessment date: July 2, 2026
+Assessment date: July 5, 2026
 
 ## Executive assessment
 
-Flux is a functional alpha with a sound event-driven architecture. The core FILE timeline is strong for ordinary coding activity, the GIT stream covers the most useful directly observable repository transitions, and INTEGRITY now reports explicit loss-of-confidence signals rather than hiding them.
+Flux is a functional alpha with a sound event-driven architecture. The core FILE timeline is strong for ordinary coding activity, the GIT stream covers the most useful directly observable repository transitions, WORK reports authoritative Beads transitions, and INTEGRITY reports explicit loss-of-confidence signals rather than hiding them.
 
 It is not yet appropriate to describe the timeline as a complete forensic record. Native watcher backends may coalesce activity, platform behavior differs, history is memory-only, and Flux deliberately does not reconcile gaps after the operating system reports dropped events.
 
@@ -13,8 +13,9 @@ It is not yet appropriate to describe the timeline as a complete forensic record
 | Architecture | Strong | Native event streams, no repository polling, bounded in-memory state, clean TUI separation |
 | FILE | Strong alpha | Main operations and diffs work; boundary moves and complex directory renames need more platform testing |
 | GIT | Good alpha | Broad semantic ref/state coverage; some repository layouts and ambiguous operation outcomes remain intentionally limited |
+| WORK | Experimental | Event-triggered Beads/Dolt history produces exact ordered issue transitions; currently version-gated to the embedded Beads 1.1 schema |
 | INTEGRITY | Good foundation | Explicit rescan, error, channel, root-loss, and read-failure reporting; no automatic recovery or reconciliation |
-| Tests | Moderate | Twenty-five deterministic tests including runtime linked-worktree discovery, submodule checkout resolution, dynamic root registration, pre-baseline event honesty, concurrent native multi-root activity, real native Git commit/ref events, and macOS-imprecise rename shapes; platform matrix remains narrow |
+| Tests | Moderate | Twenty-eight default tests plus an explicit live-project mutation test cover native multi-root activity, Git transitions, Beads semantic history, sanitization, and end-to-end WORK delivery; platform matrix remains narrow |
 | Portability | Unproven beyond macOS | Built on cross-platform crates, but runtime behavior has only been exercised locally on macOS |
 | Persistence | Not implemented | Timeline is intentionally process-local and memory-only |
 
@@ -116,17 +117,52 @@ This is event-triggered debouncing, not periodic state polling.
 
 The GIT implementation is broad enough to be useful and remains faithful to the event-driven constraint. Its strongest area is reference and HEAD movement. Complex porcelain workflows are reported conservatively at the state-transition level.
 
+## WORK implementation
+
+### Event source
+
+Flux discovers embedded Beads stores from project-local `.beads/metadata.json`. Native filesystem activity beneath the Dolt store starts a 150 ms quiet window. Flux then advances from its last concrete Dolt commit through every unseen commit in chronological order; it does not periodically inspect Beads state.
+
+### Implemented classifications
+
+- Issue creation, claim, update, closure, and other authoritative rows from the Beads `events` table.
+- Comments with the recorded author and bounded text preview.
+- Dependency addition and removal.
+- Label addition and removal.
+- Conservative issue create/update/delete fallback when a commit changes `issues` without a richer semantic row.
+- Exact workspace attribution and a dedicated `WORK` filter, badge, color, list context, and selected-event preview.
+- Raw embedded Dolt, backup, export-state, and interactions-journal churn suppressed from FILE events while human-edited Beads configuration remains visible.
+- Missing history, schema mismatch, unavailable Dolt, malformed query output, and removed stores reported through INTEGRITY.
+
+### Deliberate certainty rules
+
+- Actor names are shown only when Beads stores them; Flux does not infer which process or agent performed a transition.
+- The native event is only a wake-up signal. Semantic ordering and meaning come from authoritative adjacent Dolt commit diffs.
+- Startup establishes the current Dolt HEAD as the cursor rather than replaying old work as if it were new.
+
+### Known limitations
+
+- WORK currently supports embedded Beads stores and requires the `dolt` executable.
+- The adapter is version-gated by required Beads/Dolt diff tables, but Beads has not yet published a stable semantic event API.
+- Beads initialized after Flux starts can be discovered from its metadata event, but non-embedded remote/server layouts are deliberately rejected.
+- Timeline cursors are process-local; restarting Flux begins observation from the then-current HEAD.
+
+### Quality judgment
+
+WORK is useful and exact for the supported Beads schema, including concurrent agents committing multiple transitions in one native burst. It remains experimental because it reads Beads' current Dolt schema rather than a documented stable event interface.
+
 ## INTEGRITY implementation
 
 ### Implemented
 
-- INFO events when FILE and GIT watches are established.
+- INFO events when FILE, GIT, and WORK observation is established.
 - DEGRADED events when an affected path cannot be inspected.
 - UNCERTAIN events for native `Rescan` sentinels emitted by macOS FSEvents and Linux inotify when events may have been dropped.
 - UNCERTAIN classification for watcher errors explicitly describing overflow, dropped events, or a required rescan.
 - LOST events for native watch exhaustion, missing watch targets, event-channel disconnection, and watched-root removal.
 - Global observer state retains the highest observed severity even when timeline events are cleared.
 - Git watcher errors use the same integrity model as filesystem watcher errors.
+- Beads cursor, schema, query, and store failures use the same integrity model.
 
 ### Known limitations
 
@@ -169,6 +205,11 @@ The current automated suite covers:
 23. Administrative Git paths resolving back to their actual working-tree checkout.
 24. Nested logical workspaces reducing to minimal physical observation roots.
 25. A modification arriving before baseline capture receiving an explicit no-baseline explanation.
+26. Flux's own Beads/Dolt history producing semantic WORK activities.
+27. Beads raw-store ignore boundaries preserving human-edited configuration.
+28. Control-character sanitization for displayed WORK text.
+
+An intentionally ignored mutation test starts Flux's native watcher against this repository, adds a real comment to `flux-4et.2`, and proves that the resulting Dolt commit arrives as a semantic `WORK` event. It is run manually because it changes the project's live Beads history.
 
 ## Recommended next hardening work
 
@@ -178,5 +219,6 @@ The current automated suite covers:
 4. Add per-root integrity state and explicit watch-recovery support without claiming gap reconstruction.
 5. Add configurable ignore patterns and retention settings.
 6. Add TUI rendering snapshots at narrow and wide terminal sizes.
+7. Add fixture stores for older/newer Beads schemas and non-macOS native trigger coverage.
 
 Categories intentionally excluded under the current evidence standard: PROCESS, MODE, DEPS, BUILD, TEST, AGENT, and inferred task grouping.

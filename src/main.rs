@@ -1,4 +1,5 @@
 mod app;
+mod beads;
 mod git;
 mod model;
 mod ui;
@@ -13,6 +14,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use app::App;
+use beads::{BeadsMonitor, BeadsMonitorEvent};
 use clap::Parser;
 use crossterm::{
     event::{self, Event as TerminalEvent, KeyCode, KeyEventKind, KeyModifiers},
@@ -48,11 +50,15 @@ fn main() -> Result<()> {
     let paths = expand_related_paths(resolve_paths(cli.paths)?);
     let mut watcher = WatchState::start(paths)?;
     let mut git_monitor = GitMonitor::discover(&watcher.roots)?;
+    let mut beads_monitor = BeadsMonitor::discover(&watcher.roots);
     let mut app = App::new(cli.max_events.max(1));
     for event in watcher.established_events() {
         app.process_integrity(event);
     }
     for event in git_monitor.established_events() {
+        app.process_integrity(event);
+    }
+    for event in beads_monitor.established_events() {
         app.process_integrity(event);
     }
 
@@ -62,7 +68,13 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend).context("failed to initialize terminal")?;
 
-    let result = run(&mut terminal, &mut app, &mut watcher, &mut git_monitor);
+    let result = run(
+        &mut terminal,
+        &mut app,
+        &mut watcher,
+        &mut git_monitor,
+        &mut beads_monitor,
+    );
     restore_terminal(&mut terminal)?;
     result
 }
@@ -72,6 +84,7 @@ fn run(
     app: &mut App,
     watcher: &mut WatchState,
     git_monitor: &mut GitMonitor,
+    beads_monitor: &mut BeadsMonitor,
 ) -> Result<()> {
     let mut filesystem_disconnected = false;
     while !app.should_quit {
@@ -84,8 +97,15 @@ fn run(
             match watcher.receiver.try_recv() {
                 Ok(Ok(event)) => {
                     filesystem_events += 1;
+                    beads_monitor.observe_workspace_event(&event);
                     for git_event in git_monitor.observe_workspace_event(&event) {
-                        process_git_monitor_event(app, watcher, git_monitor, git_event);
+                        process_git_monitor_event(
+                            app,
+                            watcher,
+                            git_monitor,
+                            beads_monitor,
+                            git_event,
+                        );
                     }
                     app.process_notify(watcher, event);
                 }
@@ -118,10 +138,21 @@ fn run(
         }
         watcher.seed_step(MAX_BASELINE_ENTRIES_PER_TICK);
         for event in git_monitor.drain() {
-            process_git_monitor_event(app, watcher, git_monitor, event);
+            process_git_monitor_event(app, watcher, git_monitor, beads_monitor, event);
+        }
+        for event in beads_monitor.drain() {
+            process_beads_monitor_event(app, event);
         }
         app.flush_pending(watcher);
-        terminal.draw(|frame| ui::draw(frame, app, watcher, git_monitor.repository_count()))?;
+        terminal.draw(|frame| {
+            ui::draw(
+                frame,
+                app,
+                watcher,
+                git_monitor.repository_count(),
+                beads_monitor.store_count(),
+            )
+        })?;
 
         if event::poll(Duration::from_millis(80))?
             && let TerminalEvent::Key(key) = event::read()?
@@ -172,6 +203,7 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers, roots: &[Pa
         KeyCode::Char('4') => app.toggle_kind(3),
         KeyCode::Char('5') => app.toggle_kind(4),
         KeyCode::Char('6') => app.toggle_kind(5),
+        KeyCode::Char('7') => app.toggle_kind(6),
         KeyCode::Char('w') => app.cycle_workspace(roots, false),
         KeyCode::Char('W') => app.cycle_workspace(roots, true),
         KeyCode::Char('t') => app.folders_open = !app.folders_open,
@@ -183,6 +215,7 @@ fn process_git_monitor_event(
     app: &mut App,
     watcher: &mut WatchState,
     git_monitor: &mut GitMonitor,
+    beads_monitor: &mut BeadsMonitor,
     event: GitMonitorEvent,
 ) {
     match event {
@@ -191,6 +224,9 @@ fn process_git_monitor_event(
         GitMonitorEvent::RelatedWorktree(root) => match watcher.add_root(root.clone()) {
             Ok(Some(integrity)) => {
                 app.process_integrity(integrity);
+                for event in beads_monitor.add_root(&root) {
+                    app.process_integrity(event);
+                }
                 for event in git_monitor.add_root(&root) {
                     match event {
                         GitMonitorEvent::Activity(activity) => app.process_git(activity),
@@ -208,6 +244,13 @@ fn process_git_monitor_event(
                 root,
             }),
         },
+    }
+}
+
+fn process_beads_monitor_event(app: &mut App, event: BeadsMonitorEvent) {
+    match event {
+        BeadsMonitorEvent::Activity(activity) => app.process_beads(activity),
+        BeadsMonitorEvent::Integrity(integrity) => app.process_integrity(integrity),
     }
 }
 

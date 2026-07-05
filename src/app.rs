@@ -10,6 +10,7 @@ use notify::{
 };
 
 use crate::{
+    beads::BeadsActivity,
     git::GitActivity,
     model::{ChangeEvent, ChangeKind, IntegrityEvent, IntegrityLevel, TargetKind},
     watcher::{Snapshot, WatchState, build_diff, ignored},
@@ -33,7 +34,7 @@ pub struct App {
     pub should_quit: bool,
     pub search: String,
     pub search_mode: bool,
-    pub enabled: [bool; 6],
+    pub enabled: [bool; 7],
     pub status: Option<String>,
     pub catching_up: bool,
     pub folders_open: bool,
@@ -55,7 +56,7 @@ impl App {
             should_quit: false,
             search: String::new(),
             search_mode: false,
-            enabled: [true; 6],
+            enabled: [true; 7],
             status: None,
             catching_up: false,
             folders_open: true,
@@ -284,6 +285,38 @@ impl App {
             kind: ChangeKind::Git,
             target: TargetKind::Repository,
             path: PathBuf::from(activity.summary),
+            previous_path: None,
+            root: activity.root,
+            occurred_at: Instant::now(),
+            size: 0,
+            lines_added: 0,
+            lines_removed: 0,
+            diff: Vec::new(),
+            detail: Some(activity.detail),
+            integrity_level: None,
+        };
+        self.next_id += 1;
+        if self.paused {
+            self.paused_events.push_front(event);
+        } else {
+            self.push_event(event);
+        }
+    }
+
+    pub fn process_beads(&mut self, activity: BeadsActivity) {
+        let path = if activity.title.is_empty() {
+            PathBuf::from(format!("{} · {}", activity.issue_id, activity.action))
+        } else {
+            PathBuf::from(format!(
+                "{} · {} · {}",
+                activity.issue_id, activity.action, activity.title
+            ))
+        };
+        let event = ChangeEvent {
+            id: self.next_id,
+            kind: ChangeKind::Work,
+            target: TargetKind::WorkItem,
+            path,
             previous_path: None,
             root: activity.root,
             occurred_at: Instant::now(),

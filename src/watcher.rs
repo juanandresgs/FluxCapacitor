@@ -273,6 +273,29 @@ pub fn integrity_from_notify_error(
 }
 
 pub fn ignored(path: &Path) -> bool {
+    let components = path
+        .components()
+        .filter_map(|component| {
+            let Component::Normal(value) = component else {
+                return None;
+            };
+            value.to_str()
+        })
+        .collect::<Vec<_>>();
+    if components.windows(2).any(|pair| {
+        pair[0] == ".beads"
+            && matches!(
+                pair[1],
+                "embeddeddolt"
+                    | "dolt"
+                    | "proxieddb"
+                    | "backup"
+                    | "export-state"
+                    | "interactions.jsonl"
+            )
+    }) {
+        return true;
+    }
     path.components().any(|component| {
         let Component::Normal(value) = component else {
             return false;
@@ -419,6 +442,11 @@ mod tests {
     #[test]
     fn ignores_only_heavy_generated_trees() {
         assert!(ignored(Path::new("project/.git/index")));
+        assert!(ignored(Path::new(
+            "project/.beads/embeddeddolt/flux/.dolt/noms/manifest"
+        )));
+        assert!(!ignored(Path::new("project/.beads/config.yaml")));
+        assert!(ignored(Path::new("project/.beads/interactions.jsonl")));
         assert!(ignored(Path::new("project/target/debug/app")));
         assert!(!ignored(Path::new("project/.github/workflows/check.yml")));
         assert!(!ignored(Path::new("project/src/main.rs")));
