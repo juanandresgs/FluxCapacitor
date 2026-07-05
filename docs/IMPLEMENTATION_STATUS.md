@@ -121,7 +121,7 @@ The GIT implementation is broad enough to be useful and remains faithful to the 
 
 ### Event source
 
-Flux discovers embedded Beads stores from project-local `.beads/metadata.json`, then establishes a dedicated non-recursive native watch on the `.beads` control directory. Beads mutations update `.beads/last-touched`; that marker starts a 150 ms quiet window. Flux then advances from its last concrete Dolt commit through every unseen commit in chronological order. Dolt storage files are not trigger sources, so Flux's own classification reads cannot wake the adapter recursively.
+Flux discovers embedded Beads stores from project-local `.beads/metadata.json`, then establishes overlapping non-recursive native watches on the `.beads` control directory and the exact `.beads/last-touched` file. Beads mutations update that marker, which starts a 150 ms quiet window. Flux then advances from its last concrete Dolt commit through every unseen commit in chronological order. Dolt storage files are not trigger sources, so Flux's own classification reads cannot wake the adapter recursively.
 
 ### Implemented classifications
 

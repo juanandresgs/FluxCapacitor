@@ -193,17 +193,35 @@ impl BeadsMonitor {
             return;
         }
         let beads_dir = root.join(".beads");
-        if self.watched_dirs.insert(beads_dir.clone())
-            && let Err(error) = self._watcher.watch(&beads_dir, RecursiveMode::NonRecursive)
-        {
+        let marker = beads_dir.join("last-touched");
+        let mut watching = false;
+        for target in [&beads_dir, &marker] {
+            if !target.exists() || !self.watched_dirs.insert(target.clone()) {
+                continue;
+            }
+            match self._watcher.watch(target, RecursiveMode::NonRecursive) {
+                Ok(()) => watching = true,
+                Err(error) => {
+                    self.watched_dirs.remove(target);
+                    self.established.push(IntegrityEvent {
+                        level: IntegrityLevel::Degraded,
+                        source: "beads",
+                        summary: "metadata watch target unavailable".into(),
+                        detail: format!("{}: {error}", target.display()),
+                        root: root.to_path_buf(),
+                    });
+                }
+            }
+        }
+        if !watching {
             self.established.push(IntegrityEvent {
                 level: IntegrityLevel::Lost,
                 source: "beads",
                 summary: "metadata watch could not start".into(),
-                detail: error.to_string(),
+                detail: "neither the Beads control directory nor mutation marker is observable"
+                    .into(),
                 root: root.to_path_buf(),
             });
-            self.watched_dirs.remove(&beads_dir);
             return;
         }
         match open_store(root, &metadata_path) {
@@ -212,7 +230,7 @@ impl BeadsMonitor {
                     level: IntegrityLevel::Info,
                     source: "beads",
                     summary: "work history connected".into(),
-                    detail: format!("watching {}", beads_dir.join("last-touched").display()),
+                    detail: format!("watching {}", marker.display()),
                     root: root.to_path_buf(),
                 });
                 self.stores.push(store);
