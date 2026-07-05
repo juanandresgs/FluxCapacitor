@@ -43,7 +43,7 @@ flux ~/Code/api ~/Code/web ~/Code/worker
 - Stable workspace labels across multiple projects and concurrent agents.
 - Linked Git worktrees joining the timeline automatically.
 - Watcher failures and dropped-event signals reported explicitly.
-- Raw Beads/Dolt storage churn is suppressed while human-edited Beads configuration remains visible.
+- The entire `.beads` metadata tree is consumed internally and suppressed from FILE events, just like `.git`.
 
 Flux consumes native filesystem notifications. It does not wrap agents, poll repositories, or guess which process caused a change.
 When a tracked project has an embedded Beads store, native storage activity triggers ordered semantic reads from Dolt.

@@ -273,36 +273,13 @@ pub fn integrity_from_notify_error(
 }
 
 pub fn ignored(path: &Path) -> bool {
-    let components = path
-        .components()
-        .filter_map(|component| {
-            let Component::Normal(value) = component else {
-                return None;
-            };
-            value.to_str()
-        })
-        .collect::<Vec<_>>();
-    if components.windows(2).any(|pair| {
-        pair[0] == ".beads"
-            && matches!(
-                pair[1],
-                "embeddeddolt"
-                    | "dolt"
-                    | "proxieddb"
-                    | "backup"
-                    | "export-state"
-                    | "interactions.jsonl"
-            )
-    }) {
-        return true;
-    }
     path.components().any(|component| {
         let Component::Normal(value) = component else {
             return false;
         };
         matches!(
             value.to_str(),
-            Some(".git" | "node_modules" | "target" | "dist" | "coverage")
+            Some(".git" | ".beads" | "node_modules" | "target" | "dist" | "coverage")
         )
     })
 }
@@ -445,7 +422,9 @@ mod tests {
         assert!(ignored(Path::new(
             "project/.beads/embeddeddolt/flux/.dolt/noms/manifest"
         )));
-        assert!(!ignored(Path::new("project/.beads/config.yaml")));
+        assert!(ignored(Path::new("project/.beads/config.yaml")));
+        assert!(ignored(Path::new("project/.beads/metadata.json")));
+        assert!(ignored(Path::new("project/.beads/last-touched")));
         assert!(ignored(Path::new("project/.beads/interactions.jsonl")));
         assert!(ignored(Path::new("project/target/debug/app")));
         assert!(!ignored(Path::new("project/.github/workflows/check.yml")));

@@ -5,7 +5,7 @@ All notable changes to Flux Capacitor are documented here.
 ## Unreleased
 
 - Add an event-triggered `WORK` timeline for authoritative Beads issue transitions.
-- Suppress raw Beads/Dolt storage churn while preserving visible configuration edits.
+- Suppress the entire `.beads` metadata tree from FILE events while retaining semantic WORK events.
 - Validate WORK delivery against Flux's own live Beads project history.
 
 ## 0.1.0 - 2026-07-04

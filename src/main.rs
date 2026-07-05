@@ -27,6 +27,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use watcher::WatchState;
 
 const MAX_FILESYSTEM_EVENTS_PER_TICK: usize = 512;
+const MAX_INTERNAL_EVENTS_PER_TICK: usize = 4096;
 const MAX_BASELINE_ENTRIES_PER_TICK: usize = 1024;
 
 #[derive(Parser, Debug)]
@@ -89,14 +90,21 @@ fn run(
     let mut filesystem_disconnected = false;
     while !app.should_quit {
         let mut filesystem_events = 0;
+        let mut internal_events = 0;
         loop {
-            if filesystem_events >= MAX_FILESYSTEM_EVENTS_PER_TICK {
+            if filesystem_events >= MAX_FILESYSTEM_EVENTS_PER_TICK
+                || internal_events >= MAX_INTERNAL_EVENTS_PER_TICK
+            {
                 app.catching_up = true;
                 break;
             }
             match watcher.receiver.try_recv() {
                 Ok(Ok(event)) => {
-                    filesystem_events += 1;
+                    internal_events += 1;
+                    let visible = visible_filesystem_event(&event);
+                    if visible {
+                        filesystem_events += 1;
+                    }
                     beads_monitor.observe_workspace_event(&event);
                     for git_event in git_monitor.observe_workspace_event(&event) {
                         process_git_monitor_event(
@@ -107,7 +115,9 @@ fn run(
                             git_event,
                         );
                     }
-                    app.process_notify(watcher, event);
+                    if visible {
+                        app.process_notify(watcher, event);
+                    }
                 }
                 Ok(Err(error)) => {
                     let fallback = watcher.roots.first().cloned().unwrap_or_default();
@@ -162,6 +172,10 @@ fn run(
         }
     }
     Ok(())
+}
+
+fn visible_filesystem_event(event: &notify::Event) -> bool {
+    event.need_rescan() || event.paths.iter().any(|path| !watcher::ignored(path))
 }
 
 fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers, roots: &[PathBuf]) {
@@ -302,4 +316,22 @@ fn install_panic_hook() {
         let _ = execute!(stdout(), LeaveAlternateScreen);
         previous(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::EventKind;
+
+    #[test]
+    fn internal_metadata_events_do_not_consume_file_timeline_budget() {
+        let beads = notify::Event::new(EventKind::Any)
+            .add_path(PathBuf::from("project/.beads/last-touched"));
+        let git = notify::Event::new(EventKind::Any).add_path(PathBuf::from("project/.git/index"));
+        let source =
+            notify::Event::new(EventKind::Any).add_path(PathBuf::from("project/src/main.rs"));
+        assert!(!visible_filesystem_event(&beads));
+        assert!(!visible_filesystem_event(&git));
+        assert!(visible_filesystem_event(&source));
+    }
 }

@@ -10,7 +10,7 @@ The core architecture is appropriate for the product: native event streams, cons
 
 ## Evidence
 
-- `cargo test`: 28 tests pass locally with one intentionally ignored live Beads mutation test; coverage includes runtime linked-worktree discovery, incremental-baseline honesty, dynamic native root registration, real multi-root filesystem and Git activity, and semantic reads from Flux's own Beads history.
+- `cargo test`: 29 tests pass locally with one intentionally ignored live Beads mutation test; coverage includes runtime linked-worktree discovery, incremental-baseline honesty, internal-metadata isolation, dynamic native root registration, real multi-root filesystem and Git activity, and semantic reads from Flux's own Beads history.
 - The ignored live test was run explicitly and passed: a real `bd comment` produced native Dolt activity and rendered as a semantic `WORK` event in the release TUI.
 - `cargo clippy --locked --all-targets -- -D warnings`: passes.
 - `cargo fmt --check`: passes.
@@ -33,7 +33,7 @@ The public repository, MIT license, Cargo metadata, changelog, release workflow,
 ### Required before calling it production-ready
 
 1. **Platform runtime hardening:** exercise native event shapes, renames, root loss, watch limits, Git worktrees, and high-volume activity on Linux and Windows—not only compilation and short CI tests.
-2. **Backpressure:** filesystem and Git callback channels are unbounded. Rendering yields after 512 filesystem events, which preserves responsiveness, but a producer can still grow memory without a hard queue limit.
+2. **Backpressure:** filesystem and Git callback channels are unbounded. Rendering yields after 512 visible filesystem events or 4,096 internal metadata triggers, which preserves responsiveness, but a producer can still grow memory without a hard queue limit.
 3. **Recovery:** a lost watcher or dropped-event sentinel is reported honestly, but Flux does not re-establish observation or reconcile current state.
 4. **Per-root integrity:** global health can obscure which workspace has degraded or stopped.
 5. **Terminal cleanup:** panic and normal exits restore the terminal, but termination signals and failures between raw-mode activation and terminal construction are not comprehensively guarded.

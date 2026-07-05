@@ -15,7 +15,7 @@ It is not yet appropriate to describe the timeline as a complete forensic record
 | GIT | Good alpha | Broad semantic ref/state coverage; some repository layouts and ambiguous operation outcomes remain intentionally limited |
 | WORK | Experimental | Event-triggered Beads/Dolt history produces exact ordered issue transitions; currently version-gated to the embedded Beads 1.1 schema |
 | INTEGRITY | Good foundation | Explicit rescan, error, channel, root-loss, and read-failure reporting; no automatic recovery or reconciliation |
-| Tests | Moderate | Twenty-eight default tests plus an explicit live-project mutation test cover native multi-root activity, Git transitions, Beads semantic history, sanitization, and end-to-end WORK delivery; platform matrix remains narrow |
+| Tests | Moderate | Twenty-nine default tests plus an explicit live-project mutation test cover native multi-root activity, Git transitions, Beads semantic history, sanitization, internal-metadata isolation, and end-to-end WORK delivery; platform matrix remains narrow |
 | Portability | Unproven beyond macOS | Built on cross-platform crates, but runtime behavior has only been exercised locally on macOS |
 | Persistence | Not implemented | Timeline is intentionally process-local and memory-only |
 
@@ -29,7 +29,7 @@ It is not yet appropriate to describe the timeline as a complete forensic record
 - With multiple roots, every timeline row and preview carries the same stable, colored workspace label. Same-named roots use their shortest unique path suffix.
 - `w` and `W` cycle a workspace focus without changing the retained global timeline or its observed order.
 - The tracked-folder list lives in a bottom drawer toggled with `t`, leaving the header focused on health and aggregate scope.
-- Filesystem intake is capped at 512 events per render pass; `CATCHING UP` appears while Flux yields to keep interaction and drawing responsive under sustained activity.
+- Visible filesystem intake is capped at 512 events per render pass. Internal `.git` and `.beads` triggers have a separate 4,096-event safety cap, so ordinary metadata bursts do not show `CATCHING UP` or displace FILE capacity.
 - The same hierarchy is used in stacked 80-column and split-pane wide layouts.
 
 ## FILE implementation
@@ -131,7 +131,7 @@ Flux discovers embedded Beads stores from project-local `.beads/metadata.json`. 
 - Label addition and removal.
 - Conservative issue create/update/delete fallback when a commit changes `issues` without a richer semantic row.
 - Exact workspace attribution and a dedicated `WORK` filter, badge, color, list context, and selected-event preview.
-- Raw embedded Dolt, backup, export-state, and interactions-journal churn suppressed from FILE events while human-edited Beads configuration remains visible.
+- The entire `.beads` metadata tree is consumed as an internal trigger and suppressed from FILE events, matching the existing `.git` boundary.
 - Missing history, schema mismatch, unavailable Dolt, malformed query output, and removed stores reported through INTEGRITY.
 
 ### Deliberate certainty rules
@@ -206,8 +206,9 @@ The current automated suite covers:
 24. Nested logical workspaces reducing to minimal physical observation roots.
 25. A modification arriving before baseline capture receiving an explicit no-baseline explanation.
 26. Flux's own Beads/Dolt history producing semantic WORK activities.
-27. Beads raw-store ignore boundaries preserving human-edited configuration.
+27. The complete `.beads` metadata boundary being suppressed from FILE events.
 28. Control-character sanitization for displayed WORK text.
+29. Internal Git/Beads metadata events remaining outside the visible FILE-event budget.
 
 An intentionally ignored mutation test starts Flux's native watcher against this repository, adds a real comment to `flux-4et.2`, and proves that the resulting Dolt commit arrives as a semantic `WORK` event. It is run manually because it changes the project's live Beads history.
 
