@@ -15,7 +15,7 @@ It is not yet appropriate to describe the timeline as a complete forensic record
 | GIT | Good alpha | Broad semantic ref/state coverage; some repository layouts and ambiguous operation outcomes remain intentionally limited |
 | WORK | Experimental | Event-triggered Beads/Dolt history produces exact ordered issue transitions; currently version-gated to the embedded Beads 1.1 schema |
 | INTEGRITY | Good foundation | Explicit rescan, error, channel, root-loss, and read-failure reporting; no automatic recovery or reconciliation |
-| Tests | Moderate | Twenty-nine default tests plus an explicit live-project mutation test cover native multi-root activity, Git transitions, Beads semantic history, sanitization, internal-metadata isolation, and end-to-end WORK delivery; platform matrix remains narrow |
+| Tests | Moderate | Thirty default tests plus an explicit live-project mutation test cover native multi-root activity, Git transitions, Beads semantic history, coalesced metadata paths, sanitization, internal-metadata isolation, and end-to-end WORK delivery; platform matrix remains narrow |
 | Portability | Unproven beyond macOS | Built on cross-platform crates, but runtime behavior has only been exercised locally on macOS |
 | Persistence | Not implemented | Timeline is intentionally process-local and memory-only |
 
@@ -121,7 +121,7 @@ The GIT implementation is broad enough to be useful and remains faithful to the 
 
 ### Event source
 
-Flux discovers embedded Beads stores from project-local `.beads/metadata.json`. Native filesystem activity beneath the Dolt store starts a 150 ms quiet window. Flux then advances from its last concrete Dolt commit through every unseen commit in chronological order; it does not periodically inspect Beads state.
+Flux discovers embedded Beads stores from project-local `.beads/metadata.json`. Native filesystem activity anywhere beneath `.beads` starts a 150 ms quiet window, including parent-directory paths produced by coalescing backends such as macOS FSEvents. Flux then advances from its last concrete Dolt commit through every unseen commit in chronological order; it does not periodically inspect Beads state.
 
 ### Implemented classifications
 
@@ -209,6 +209,7 @@ The current automated suite covers:
 27. The complete `.beads` metadata boundary being suppressed from FILE events.
 28. Control-character sanitization for displayed WORK text.
 29. Internal Git/Beads metadata events remaining outside the visible FILE-event budget.
+30. Coalesced `.beads` and `.beads/embeddeddolt` parent events waking the semantic store adapter.
 
 An intentionally ignored mutation test starts Flux's native watcher against this repository, adds a real comment to `flux-4et.2`, and proves that the resulting Dolt commit arrives as a semantic `WORK` event. It is run manually because it changes the project's live Beads history.
 

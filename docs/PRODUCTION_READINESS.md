@@ -10,7 +10,7 @@ The core architecture is appropriate for the product: native event streams, cons
 
 ## Evidence
 
-- `cargo test`: 29 tests pass locally with one intentionally ignored live Beads mutation test; coverage includes runtime linked-worktree discovery, incremental-baseline honesty, internal-metadata isolation, dynamic native root registration, real multi-root filesystem and Git activity, and semantic reads from Flux's own Beads history.
+- `cargo test`: 30 tests pass locally with one intentionally ignored live Beads mutation test; coverage includes runtime linked-worktree discovery, incremental-baseline honesty, coalesced Beads metadata paths, internal-metadata isolation, dynamic native root registration, real multi-root filesystem and Git activity, and semantic reads from Flux's own Beads history.
 - The ignored live test was run explicitly and passed: a real `bd comment` produced native Dolt activity and rendered as a semantic `WORK` event in the release TUI.
 - `cargo clippy --locked --all-targets -- -D warnings`: passes.
 - `cargo fmt --check`: passes.

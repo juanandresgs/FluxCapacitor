@@ -89,11 +89,7 @@ impl BeadsMonitor {
     pub fn observe_workspace_event(&mut self, event: &Event) {
         let observed_at = Instant::now();
         for store in &mut self.stores {
-            if event
-                .paths
-                .iter()
-                .any(|path| path.starts_with(&store.data_dir))
-            {
+            if event.paths.iter().any(|path| store.observes_path(path)) {
                 store.dirty_since = Some(observed_at);
             }
         }
@@ -162,6 +158,12 @@ impl BeadsMonitor {
                 root: root.to_path_buf(),
             }),
         }
+    }
+}
+
+impl BeadsStore {
+    fn observes_path(&self, path: &Path) -> bool {
+        path == self.root || path.starts_with(self.root.join(".beads"))
     }
 }
 
@@ -559,6 +561,20 @@ mod tests {
             truncate("line one\nline two\u{1b}", 80),
             "line one line two "
         );
+    }
+
+    #[test]
+    fn coalesced_beads_parent_paths_trigger_the_store() {
+        let store = BeadsStore {
+            root: PathBuf::from("/project"),
+            data_dir: PathBuf::from("/project/.beads/embeddeddolt/flux"),
+            cursor: "head".into(),
+            dirty_since: None,
+        };
+        assert!(store.observes_path(Path::new("/project/.beads")));
+        assert!(store.observes_path(Path::new("/project/.beads/embeddeddolt")));
+        assert!(store.observes_path(Path::new("/project/.beads/embeddeddolt/flux/.dolt/noms")));
+        assert!(!store.observes_path(Path::new("/project/src/main.rs")));
     }
 
     #[test]
