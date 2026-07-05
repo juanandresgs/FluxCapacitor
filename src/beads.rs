@@ -37,6 +37,7 @@ struct BeadsStore {
     data_dir: PathBuf,
     cursor: String,
     dirty_since: Option<Instant>,
+    suppress_storage_until: Option<Instant>,
 }
 
 pub struct BeadsMonitor {
@@ -102,6 +103,13 @@ impl BeadsMonitor {
     }
 
     pub fn observe_workspace_event(&mut self, event: &Event) {
+        let observed_at = Instant::now();
+        for store in &mut self.stores {
+            for path in &event.paths {
+                store.observe_path(path, observed_at);
+            }
+        }
+
         let roots = self.roots.clone();
         for root in roots {
             let metadata = root.join(".beads/metadata.json");
@@ -132,8 +140,8 @@ impl BeadsMonitor {
                     }
                     let observed_at = Instant::now();
                     for store in &mut self.stores {
-                        if event.paths.iter().any(|path| store.observes_path(path)) {
-                            store.dirty_since = Some(observed_at);
+                        for path in &event.paths {
+                            store.observe_path(path, observed_at);
                         }
                     }
                 }
@@ -168,6 +176,7 @@ impl BeadsMonitor {
                 continue;
             }
             store.dirty_since = None;
+            store.suppress_storage_until = Some(Instant::now() + Duration::from_secs(1));
             match advance_store(store) {
                 Ok(activities) => {
                     output.extend(activities.into_iter().map(BeadsMonitorEvent::Activity))
@@ -247,8 +256,18 @@ impl BeadsMonitor {
 }
 
 impl BeadsStore {
-    fn observes_path(&self, path: &Path) -> bool {
-        path == self.root.join(".beads/last-touched")
+    fn observe_path(&mut self, path: &Path, observed_at: Instant) {
+        if path == self.root.join(".beads/last-touched") {
+            self.dirty_since.get_or_insert(observed_at);
+            return;
+        }
+        if path.starts_with(&self.data_dir)
+            && self
+                .suppress_storage_until
+                .is_none_or(|until| observed_at >= until)
+        {
+            self.dirty_since.get_or_insert(observed_at);
+        }
     }
 }
 
@@ -293,6 +312,7 @@ fn open_store(root: &Path, metadata_path: &Path) -> Result<BeadsStore> {
         data_dir,
         cursor,
         dirty_since: None,
+        suppress_storage_until: None,
     })
 }
 
@@ -648,17 +668,22 @@ mod tests {
     }
 
     #[test]
-    fn only_the_beads_mutation_marker_triggers_the_store() {
-        let store = BeadsStore {
+    fn marker_is_authoritative_and_storage_is_suppressed_after_reads() {
+        let now = Instant::now();
+        let mut store = BeadsStore {
             root: PathBuf::from("/project"),
             data_dir: PathBuf::from("/project/.beads/embeddeddolt/flux"),
             cursor: "head".into(),
             dirty_since: None,
+            suppress_storage_until: Some(now + Duration::from_secs(1)),
         };
-        assert!(store.observes_path(Path::new("/project/.beads/last-touched")));
-        assert!(!store.observes_path(Path::new("/project/.beads/embeddeddolt")));
-        assert!(!store.observes_path(Path::new("/project/.beads/embeddeddolt/flux/.dolt/noms")));
-        assert!(!store.observes_path(Path::new("/project/src/main.rs")));
+        store.observe_path(
+            Path::new("/project/.beads/embeddeddolt/flux/.dolt/noms/manifest"),
+            now,
+        );
+        assert!(store.dirty_since.is_none());
+        store.observe_path(Path::new("/project/.beads/last-touched"), now);
+        assert_eq!(store.dirty_since, Some(now));
     }
 
     #[test]

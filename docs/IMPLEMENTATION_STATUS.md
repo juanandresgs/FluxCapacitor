@@ -121,7 +121,7 @@ The GIT implementation is broad enough to be useful and remains faithful to the 
 
 ### Event source
 
-Flux discovers embedded Beads stores from project-local `.beads/metadata.json`, then establishes overlapping non-recursive native watches on the `.beads` control directory and the exact `.beads/last-touched` file. Beads mutations update that marker, which starts a 150 ms quiet window. Flux then advances from its last concrete Dolt commit through every unseen commit in chronological order. Dolt storage files are not trigger sources, so Flux's own classification reads cannot wake the adapter recursively.
+Flux discovers embedded Beads stores from project-local `.beads/metadata.json`, then establishes overlapping non-recursive native watches on the `.beads` control directory and the exact `.beads/last-touched` file. Beads updates that marker after committing, making it the authoritative trigger. Native Dolt activity observed by the workspace watcher is retained as a fallback for backends that fail to deliver the marker event. Flux uses leading-edge debounce and temporarily suppresses storage events produced by its own classification reads, preventing feedback without periodic polling.
 
 ### Implemented classifications
 
@@ -209,7 +209,7 @@ The current automated suite covers:
 27. The complete `.beads` metadata boundary being suppressed from FILE events.
 28. Control-character sanitization for displayed WORK text.
 29. Internal Git/Beads metadata events remaining outside the visible FILE-event budget.
-30. Only the Beads `last-touched` mutation marker waking the semantic store adapter, excluding Dolt read side effects.
+30. Marker-first delivery with storage fallback and suppression of Dolt read side effects.
 
 An intentionally ignored mutation test starts Flux's native watcher against this repository, adds a real comment to `flux-4et.2`, and proves that the resulting Dolt commit arrives as a semantic `WORK` event. It is run manually because it changes the project's live Beads history.
 
