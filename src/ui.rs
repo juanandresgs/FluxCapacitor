@@ -34,14 +34,7 @@ const WORKSPACE_COLORS: [Color; 8] = [
     Color::Rgb(190, 160, 120),
 ];
 
-pub fn draw(
-    frame: &mut Frame,
-    app: &App,
-    watcher: &WatchState,
-    git_repositories: usize,
-    beads_stores: usize,
-    work_diagnostics: &str,
-) {
+pub fn draw(frame: &mut Frame, app: &App, watcher: &WatchState, git_repositories: usize) {
     let area = frame.area();
     let folders_height = if app.folders_open {
         watcher.roots.len().min(5) as u16 + 2
@@ -57,15 +50,7 @@ pub fn draw(
     ])
     .split(area);
 
-    draw_header(
-        frame,
-        layout[0],
-        app,
-        watcher,
-        git_repositories,
-        beads_stores,
-        work_diagnostics,
-    );
+    draw_header(frame, layout[0], app, watcher, git_repositories);
     draw_filters(frame, layout[1], app, watcher);
 
     if area.width >= 100 {
@@ -94,8 +79,6 @@ fn draw_header(
     app: &App,
     watcher: &WatchState,
     git_repositories: usize,
-    beads_stores: usize,
-    work_diagnostics: &str,
 ) {
     let observer_level = app.observer_level();
     let live = if app.paused {
@@ -122,14 +105,8 @@ fn draw_header(
         Span::raw("  "),
         Span::styled(
             format!(
-                "{}  ·  {}  ·  {}",
-                count_label(watcher.roots.len(), "folder", "folders"),
-                count_label(git_repositories, "repo", "repos"),
-                if beads_stores == 0 {
-                    "WORK off".to_string()
-                } else {
-                    work_diagnostics.to_uppercase()
-                },
+                "{} folders  ·  {git_repositories} repos",
+                watcher.roots.len()
             ),
             Style::default().fg(Color::Rgb(155, 155, 160)),
         ),
@@ -370,7 +347,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, watcher: &WatchState) {
             ),
             Line::from(""),
             Line::styled(
-                "File, Git, Work, and observer-integrity events appear here.",
+                "File, Git, and observer-integrity events appear here.",
                 Style::default().fg(DIM),
             ),
         ]))
@@ -387,7 +364,6 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, watcher: &WatchState) {
     let target = match event.target {
         TargetKind::Directory => "directory",
         TargetKind::Repository => "repository",
-        TargetKind::WorkItem => "work item",
         TargetKind::File => "file",
         TargetKind::Observer => "observer",
     };
@@ -446,7 +422,6 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, watcher: &WatchState) {
             ChangeKind::Delete => "removed from the workspace",
             ChangeKind::Rename => "moved without textual changes",
             ChangeKind::Git => "repository state changed",
-            ChangeKind::Work => "work state changed",
             ChangeKind::Integrity => "observation state changed",
             _ if event.target == TargetKind::Directory => "directory event",
             _ => "metadata changed",
@@ -549,7 +524,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 hint(" find  "),
                 key("w"),
                 hint(" root  "),
-                key("1-7"),
+                key("1-6"),
                 hint(" types  "),
                 key("t"),
                 hint(" folders  "),
@@ -566,7 +541,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 hint(" search  "),
                 key("w"),
                 hint(" workspace  "),
-                key("1-7"),
+                key("1-6"),
                 hint(" filters  "),
                 key("t"),
                 hint(" folders  "),
@@ -633,10 +608,6 @@ fn key(value: &'static str) -> Span<'static> {
     )
 }
 
-fn count_label(count: usize, singular: &str, plural: &str) -> String {
-    format!("{count} {}", if count == 1 { singular } else { plural })
-}
-
 fn hint(value: &'static str) -> Span<'static> {
     Span::styled(value, Style::default().fg(DIM))
 }
@@ -648,7 +619,6 @@ fn kind_color(kind: ChangeKind) -> Color {
         ChangeKind::Rename => BLUE,
         ChangeKind::Delete => RED,
         ChangeKind::Git => Color::Rgb(196, 143, 255),
-        ChangeKind::Work => Color::Rgb(105, 210, 190),
         ChangeKind::Integrity => Color::Rgb(255, 109, 109),
     }
 }
@@ -703,10 +673,6 @@ fn event_context(event: &ChangeEvent) -> String {
                     .unwrap_or_else(|| compact_path(&event.root))
             )
         }
-        TargetKind::WorkItem => event
-            .detail
-            .clone()
-            .unwrap_or_else(|| "authoritative Beads transition".into()),
         TargetKind::Directory => format!("directory · {}", compact_path(&event.root)),
         TargetKind::File => event
             .path

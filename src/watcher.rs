@@ -279,7 +279,7 @@ pub fn ignored(path: &Path) -> bool {
         };
         matches!(
             value.to_str(),
-            Some(".git" | ".beads" | "node_modules" | "target" | "dist" | "coverage")
+            Some(".git" | "node_modules" | "target" | "dist" | "coverage")
         )
     })
 }
@@ -419,13 +419,6 @@ mod tests {
     #[test]
     fn ignores_only_heavy_generated_trees() {
         assert!(ignored(Path::new("project/.git/index")));
-        assert!(ignored(Path::new(
-            "project/.beads/embeddeddolt/flux/.dolt/noms/manifest"
-        )));
-        assert!(ignored(Path::new("project/.beads/config.yaml")));
-        assert!(ignored(Path::new("project/.beads/metadata.json")));
-        assert!(ignored(Path::new("project/.beads/last-touched")));
-        assert!(ignored(Path::new("project/.beads/interactions.jsonl")));
         assert!(ignored(Path::new("project/target/debug/app")));
         assert!(!ignored(Path::new("project/.github/workflows/check.yml")));
         assert!(!ignored(Path::new("project/src/main.rs")));

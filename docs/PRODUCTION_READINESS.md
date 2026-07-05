@@ -1,6 +1,6 @@
 # Production Readiness
 
-Assessment date: July 5, 2026
+Assessment date: July 4, 2026
 
 ## Verdict
 
@@ -10,8 +10,7 @@ The core architecture is appropriate for the product: native event streams, cons
 
 ## Evidence
 
-- `cargo test`: 30 tests pass locally with one intentionally ignored live Beads mutation test; coverage includes runtime linked-worktree discovery, incremental-baseline honesty, marker-first Beads delivery with storage fallback, internal-metadata isolation, dynamic native root registration, real multi-root filesystem and Git activity, and semantic reads from Flux's own Beads history.
-- The ignored live test was run explicitly and passed: a real `bd comment` produced native Dolt activity and rendered as a semantic `WORK` event in the release TUI.
+- `cargo test --locked`: 25 tests pass locally, including runtime linked-worktree discovery, submodule checkout resolution, incremental-baseline honesty, dynamic native root registration, and real multi-root filesystem and Git activity.
 - `cargo clippy --locked --all-targets -- -D warnings`: passes.
 - `cargo fmt --check`: passes.
 - `cargo audit`: no known RustSec advisories in the locked dependency graph.
@@ -33,12 +32,11 @@ The public repository, MIT license, Cargo metadata, changelog, release workflow,
 ### Required before calling it production-ready
 
 1. **Platform runtime hardening:** exercise native event shapes, renames, root loss, watch limits, Git worktrees, and high-volume activity on Linux and Windows—not only compilation and short CI tests.
-2. **Backpressure:** filesystem and Git callback channels are unbounded. Rendering yields after 512 visible filesystem events or 4,096 internal metadata triggers, which preserves responsiveness, but a producer can still grow memory without a hard queue limit.
+2. **Backpressure:** filesystem and Git callback channels are unbounded. Rendering yields after 512 filesystem events, which preserves responsiveness, but a producer can still grow memory without a hard queue limit.
 3. **Recovery:** a lost watcher or dropped-event sentinel is reported honestly, but Flux does not re-establish observation or reconcile current state.
 4. **Per-root integrity:** global health can obscure which workspace has degraded or stopped.
 5. **Terminal cleanup:** panic and normal exits restore the terminal, but termination signals and failures between raw-mode activation and terminal construction are not comprehensively guarded.
 6. **Release compatibility policy:** document supported OS versions and test a declared minimum Rust version before promising one beyond the dependency-derived Rust 1.88 floor.
-7. **Beads compatibility policy:** WORK support currently targets embedded Beads 1.1/Dolt schemas and needs fixture coverage across supported Beads releases before it can be called stable.
 
 ## Distribution
 

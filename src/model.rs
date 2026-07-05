@@ -7,18 +7,16 @@ pub enum ChangeKind {
     Rename,
     Delete,
     Git,
-    Work,
     Integrity,
 }
 
 impl ChangeKind {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::Modify,
         Self::Create,
         Self::Rename,
         Self::Delete,
         Self::Git,
-        Self::Work,
         Self::Integrity,
     ];
 
@@ -29,7 +27,6 @@ impl ChangeKind {
             Self::Rename => "MOVE",
             Self::Delete => "DELETE",
             Self::Git => "GIT",
-            Self::Work => "WORK",
             Self::Integrity => "INTEGRITY",
         }
     }
@@ -41,7 +38,6 @@ impl ChangeKind {
             Self::Rename => ">",
             Self::Delete => "-",
             Self::Git => "◆",
-            Self::Work => "●",
             Self::Integrity => "!",
         }
     }
@@ -52,7 +48,6 @@ pub enum TargetKind {
     File,
     Directory,
     Repository,
-    WorkItem,
     Observer,
 }
 

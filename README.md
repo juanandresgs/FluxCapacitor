@@ -39,15 +39,11 @@ flux ~/Code/api ~/Code/web ~/Code/worker
 
 - File creation, modification, movement, deletion, and contextual diffs.
 - Commits, merges, checkouts, branches, tags, stashes, and rewrites.
-- Beads issue creation, claims, updates, comments, dependencies, labels, and closure as `WORK` events.
 - Stable workspace labels across multiple projects and concurrent agents.
 - Linked Git worktrees joining the timeline automatically.
 - Watcher failures and dropped-event signals reported explicitly.
-- The entire `.beads` metadata tree is consumed internally and suppressed from FILE events, just like `.git`.
 
 Flux consumes native filesystem notifications. It does not wrap agents, poll repositories, or guess which process caused a change.
-When a tracked project has an embedded Beads store, native storage activity triggers ordered semantic reads from Dolt.
-The `dolt` executable is optional and only required for Beads-backed `WORK` events.
 
 ## Controls
 
@@ -55,7 +51,6 @@ The `dolt` executable is optional and only required for Beads-backed `WORK` even
 | --- | --- |
 | `/` | Filter events |
 | `w` / `W` | Cycle workspace focus |
-| `1`–`7` | Toggle event categories |
 | `t` | Toggle tracked folders |
 | `space` | Pause or resume |
 | `q` | Quit |
