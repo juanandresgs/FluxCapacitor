@@ -6,6 +6,7 @@ All notable changes to Flux Capacitor are documented here.
 
 - Add an event-triggered `WORK` timeline for authoritative Beads issue transitions.
 - Suppress the entire `.beads` metadata tree from FILE events while retaining semantic WORK events.
+- Drive WORK ingestion from Beads' `last-touched` mutation marker so Dolt classification reads cannot retrigger themselves.
 - Validate WORK delivery against Flux's own live Beads project history.
 
 ## 0.1.0 - 2026-07-04

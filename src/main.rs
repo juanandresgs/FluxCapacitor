@@ -51,7 +51,7 @@ fn main() -> Result<()> {
     let paths = expand_related_paths(resolve_paths(cli.paths)?);
     let mut watcher = WatchState::start(paths)?;
     let mut git_monitor = GitMonitor::discover(&watcher.roots)?;
-    let mut beads_monitor = BeadsMonitor::discover(&watcher.roots);
+    let mut beads_monitor = BeadsMonitor::discover(&watcher.roots)?;
     let mut app = App::new(cli.max_events.max(1));
     for event in watcher.established_events() {
         app.process_integrity(event);

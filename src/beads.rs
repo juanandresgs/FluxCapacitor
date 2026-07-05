@@ -1,12 +1,14 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Component, Path, PathBuf},
     process::Command,
+    sync::mpsc::{self, Receiver, TryRecvError},
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use notify::Event;
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -41,6 +43,10 @@ pub struct BeadsMonitor {
     roots: Vec<PathBuf>,
     stores: Vec<BeadsStore>,
     established: Vec<IntegrityEvent>,
+    watched_dirs: HashSet<PathBuf>,
+    receiver: Receiver<notify::Result<Event>>,
+    _watcher: RecommendedWatcher,
+    disconnected_reported: bool,
 }
 
 #[derive(Deserialize)]
@@ -57,16 +63,25 @@ struct JsonRows {
 }
 
 impl BeadsMonitor {
-    pub fn discover(roots: &[PathBuf]) -> Self {
+    pub fn discover(roots: &[PathBuf]) -> Result<Self> {
+        let (sender, receiver) = mpsc::channel();
+        let watcher = notify::recommended_watcher(move |result| {
+            let _ = sender.send(result);
+        })
+        .context("failed to create Beads metadata watcher")?;
         let mut monitor = Self {
             roots: roots.to_vec(),
             stores: Vec::new(),
             established: Vec::new(),
+            watched_dirs: HashSet::new(),
+            receiver,
+            _watcher: watcher,
+            disconnected_reported: false,
         };
         for root in roots {
             monitor.discover_root(root);
         }
-        monitor
+        Ok(monitor)
     }
 
     pub fn store_count(&self) -> usize {
@@ -87,13 +102,6 @@ impl BeadsMonitor {
     }
 
     pub fn observe_workspace_event(&mut self, event: &Event) {
-        let observed_at = Instant::now();
-        for store in &mut self.stores {
-            if event.paths.iter().any(|path| store.observes_path(path)) {
-                store.dirty_since = Some(observed_at);
-            }
-        }
-
         let roots = self.roots.clone();
         for root in roots {
             let metadata = root.join(".beads/metadata.json");
@@ -107,6 +115,51 @@ impl BeadsMonitor {
 
     pub fn drain(&mut self) -> Vec<BeadsMonitorEvent> {
         let mut output = Vec::new();
+        loop {
+            match self.receiver.try_recv() {
+                Ok(Ok(event)) => {
+                    if event.need_rescan() {
+                        output.push(BeadsMonitorEvent::Integrity(IntegrityEvent {
+                            level: IntegrityLevel::Uncertain,
+                            source: "beads",
+                            summary: "native Beads events may have been lost".into(),
+                            detail: event
+                                .info()
+                                .unwrap_or("the operating system requested a reconciliation scan")
+                                .into(),
+                            root: self.roots.first().cloned().unwrap_or_default(),
+                        }));
+                    }
+                    let observed_at = Instant::now();
+                    for store in &mut self.stores {
+                        if event.paths.iter().any(|path| store.observes_path(path)) {
+                            store.dirty_since = Some(observed_at);
+                        }
+                    }
+                }
+                Ok(Err(error)) => output.push(BeadsMonitorEvent::Integrity(IntegrityEvent {
+                    level: IntegrityLevel::Uncertain,
+                    source: "beads",
+                    summary: "metadata watcher reported an error".into(),
+                    detail: error.to_string(),
+                    root: self.roots.first().cloned().unwrap_or_default(),
+                })),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if !self.disconnected_reported {
+                        self.disconnected_reported = true;
+                        output.push(BeadsMonitorEvent::Integrity(IntegrityEvent {
+                            level: IntegrityLevel::Lost,
+                            source: "beads",
+                            summary: "metadata event channel disconnected".into(),
+                            detail: "Beads work changes are no longer observable".into(),
+                            root: self.roots.first().cloned().unwrap_or_default(),
+                        }));
+                    }
+                    break;
+                }
+            }
+        }
         for store in &mut self.stores {
             if store
                 .dirty_since
@@ -139,13 +192,27 @@ impl BeadsMonitor {
         if !metadata_path.is_file() {
             return;
         }
+        let beads_dir = root.join(".beads");
+        if self.watched_dirs.insert(beads_dir.clone())
+            && let Err(error) = self._watcher.watch(&beads_dir, RecursiveMode::NonRecursive)
+        {
+            self.established.push(IntegrityEvent {
+                level: IntegrityLevel::Lost,
+                source: "beads",
+                summary: "metadata watch could not start".into(),
+                detail: error.to_string(),
+                root: root.to_path_buf(),
+            });
+            self.watched_dirs.remove(&beads_dir);
+            return;
+        }
         match open_store(root, &metadata_path) {
             Ok(store) => {
                 self.established.push(IntegrityEvent {
                     level: IntegrityLevel::Info,
                     source: "beads",
                     summary: "work history connected".into(),
-                    detail: format!("watching {}", store.data_dir.display()),
+                    detail: format!("watching {}", beads_dir.join("last-touched").display()),
                     root: root.to_path_buf(),
                 });
                 self.stores.push(store);
@@ -163,7 +230,7 @@ impl BeadsMonitor {
 
 impl BeadsStore {
     fn observes_path(&self, path: &Path) -> bool {
-        path == self.root || path.starts_with(self.root.join(".beads"))
+        path == self.root.join(".beads/last-touched")
     }
 }
 
@@ -544,7 +611,6 @@ fn string(row: &Map<String, Value>, field: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::watcher::WatchState;
     use std::{process::Command, thread};
 
     #[test]
@@ -564,16 +630,16 @@ mod tests {
     }
 
     #[test]
-    fn coalesced_beads_parent_paths_trigger_the_store() {
+    fn only_the_beads_mutation_marker_triggers_the_store() {
         let store = BeadsStore {
             root: PathBuf::from("/project"),
             data_dir: PathBuf::from("/project/.beads/embeddeddolt/flux"),
             cursor: "head".into(),
             dirty_since: None,
         };
-        assert!(store.observes_path(Path::new("/project/.beads")));
-        assert!(store.observes_path(Path::new("/project/.beads/embeddeddolt")));
-        assert!(store.observes_path(Path::new("/project/.beads/embeddeddolt/flux/.dolt/noms")));
+        assert!(store.observes_path(Path::new("/project/.beads/last-touched")));
+        assert!(!store.observes_path(Path::new("/project/.beads/embeddeddolt")));
+        assert!(!store.observes_path(Path::new("/project/.beads/embeddeddolt/flux/.dolt/noms")));
         assert!(!store.observes_path(Path::new("/project/src/main.rs")));
     }
 
@@ -619,8 +685,8 @@ mod tests {
         {
             return;
         }
-        let watcher = WatchState::start(vec![root.clone()]).expect("start native watcher");
-        let mut monitor = BeadsMonitor::discover(std::slice::from_ref(&root));
+        let mut monitor = BeadsMonitor::discover(std::slice::from_ref(&root))
+            .expect("start Beads metadata watcher");
         assert_eq!(monitor.store_count(), 1);
 
         let marker = format!("Flux live adapter validation at {:?}", Instant::now());
@@ -638,21 +704,19 @@ mod tests {
         assert!(status.success());
 
         let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            match watcher.receiver.recv_timeout(Duration::from_millis(120)) {
-                Ok(Ok(event)) => monitor.observe_workspace_event(&event),
-                Ok(Err(error)) => panic!("native watcher failed: {error}"),
-                Err(_) => break,
-            }
+        let mut observed = false;
+        while Instant::now() < deadline && !observed {
+            thread::sleep(Duration::from_millis(50));
+            observed = monitor.drain().iter().any(|event| {
+                matches!(
+                    event,
+                    BeadsMonitorEvent::Activity(activity)
+                        if activity.issue_id == "flux-4et.2"
+                            && activity.action == "commented"
+                            && activity.detail.contains(&marker)
+                )
+            });
         }
-        thread::sleep(EVENT_QUIET_PERIOD + Duration::from_millis(50));
-        let events = monitor.drain();
-        assert!(events.iter().any(|event| matches!(
-            event,
-            BeadsMonitorEvent::Activity(activity)
-                if activity.issue_id == "flux-4et.2"
-                    && activity.action == "commented"
-                    && activity.detail.contains(&marker)
-        )));
+        assert!(observed);
     }
 }
