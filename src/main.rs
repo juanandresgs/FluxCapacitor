@@ -7,7 +7,11 @@ mod watcher;
 use std::{
     io::{self, stdout},
     path::PathBuf,
-    sync::mpsc::TryRecvError,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc::TryRecvError,
+    },
     time::Duration,
 };
 
@@ -15,6 +19,7 @@ use anyhow::{Context, Result, bail};
 use app::App;
 use clap::Parser;
 use crossterm::{
+    cursor::Show,
     event::{self, Event as TerminalEvent, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -26,6 +31,7 @@ use watcher::WatchState;
 
 const MAX_FILESYSTEM_EVENTS_PER_TICK: usize = 512;
 const MAX_BASELINE_ENTRIES_PER_TICK: usize = 1024;
+static TERMINATION_REQUESTED: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
 #[derive(Parser, Debug)]
 #[command(
@@ -41,12 +47,21 @@ struct Cli {
     /// Maximum number of events retained in memory.
     #[arg(long, default_value_t = 1000)]
     max_events: usize,
+
+    /// Maximum bytes retained for text diff baselines.
+    #[arg(long, default_value_t = watcher::DEFAULT_SNAPSHOT_BYTES)]
+    max_snapshot_bytes: usize,
+
+    /// Maximum number of filesystem baselines retained in memory.
+    #[arg(long, default_value_t = watcher::DEFAULT_SNAPSHOT_ENTRIES)]
+    max_snapshots: usize,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = expand_related_paths(resolve_paths(cli.paths)?);
-    let mut watcher = WatchState::start(paths)?;
+    let mut watcher =
+        WatchState::start_with_snapshot_limits(paths, cli.max_snapshot_bytes, cli.max_snapshots)?;
     let mut git_monitor = GitMonitor::discover(&watcher.roots)?;
     let mut app = App::new(cli.max_events.max(1));
     for event in watcher.established_events() {
@@ -57,14 +72,16 @@ fn main() -> Result<()> {
     }
 
     install_panic_hook();
-    enable_raw_mode().context("failed to enter raw terminal mode")?;
-    execute!(stdout(), EnterAlternateScreen).context("failed to enter alternate screen")?;
+    install_termination_handler()?;
+    let mut terminal_guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend).context("failed to initialize terminal")?;
 
     let result = run(&mut terminal, &mut app, &mut watcher, &mut git_monitor);
-    restore_terminal(&mut terminal)?;
-    result
+    drop(terminal);
+    let restore_result = terminal_guard.restore();
+    result?;
+    restore_result
 }
 
 fn run(
@@ -74,7 +91,7 @@ fn run(
     git_monitor: &mut GitMonitor,
 ) -> Result<()> {
     let mut filesystem_disconnected = false;
-    while !app.should_quit {
+    while !app.should_quit && !termination_requested().load(Ordering::Relaxed) {
         let mut filesystem_events = 0;
         loop {
             if filesystem_events >= MAX_FILESYSTEM_EVENTS_PER_TICK {
@@ -91,11 +108,13 @@ fn run(
                 }
                 Ok(Err(error)) => {
                     let fallback = watcher.roots.first().cloned().unwrap_or_default();
-                    app.process_integrity(watcher::integrity_from_notify_error(
-                        "filesystem",
-                        error,
-                        &fallback,
-                    ));
+                    let mut integrity =
+                        watcher::integrity_from_notify_error("filesystem", error, &fallback);
+                    integrity.root = watcher.root_for(&integrity.root);
+                    if integrity.level == IntegrityLevel::Lost {
+                        watcher.schedule_recovery(watcher.root_for(&integrity.root));
+                    }
+                    app.process_integrity(integrity);
                 }
                 Err(TryRecvError::Empty) => {
                     app.catching_up = false;
@@ -116,7 +135,30 @@ fn run(
                 }
             }
         }
+        let dropped = watcher.take_dropped_events();
+        if dropped > 0 {
+            app.process_integrity(IntegrityEvent {
+                level: IntegrityLevel::Uncertain,
+                source: "filesystem",
+                summary: "filesystem event queue overflowed".into(),
+                detail: format!("{dropped} native events were dropped before classification"),
+                root: PathBuf::new(),
+            });
+        }
         watcher.seed_step(MAX_BASELINE_ENTRIES_PER_TICK);
+        for event in watcher.recover_due() {
+            app.process_integrity(event);
+        }
+        let omitted = watcher.take_snapshot_omissions();
+        if omitted > 0 {
+            app.process_integrity(IntegrityEvent {
+                level: IntegrityLevel::Degraded,
+                source: "filesystem",
+                summary: "snapshot memory budget reached".into(),
+                detail: format!("{omitted} text baselines were omitted; metadata remains visible"),
+                root: PathBuf::new(),
+            });
+        }
         for event in git_monitor.drain() {
             process_git_monitor_event(app, watcher, git_monitor, event);
         }
@@ -244,12 +286,83 @@ fn resolve_paths(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
     Ok(resolved)
 }
 
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-    disable_raw_mode().context("failed to leave raw terminal mode")?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)
-        .context("failed to leave alternate screen")?;
-    terminal.show_cursor().context("failed to restore cursor")?;
+fn termination_requested() -> &'static Arc<AtomicBool> {
+    TERMINATION_REQUESTED.get_or_init(|| Arc::new(AtomicBool::new(false)))
+}
+
+#[cfg(unix)]
+fn install_termination_handler() -> Result<()> {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    use signal_hook::flag;
+
+    let requested = termination_requested();
+    requested.store(false, Ordering::Relaxed);
+    for signal in [SIGINT, SIGTERM, SIGHUP] {
+        flag::register(signal, Arc::clone(requested))
+            .with_context(|| format!("failed to register signal {signal}"))?;
+    }
     Ok(())
+}
+
+#[cfg(windows)]
+fn install_termination_handler() -> Result<()> {
+    let requested = Arc::clone(termination_requested());
+    requested.store(false, Ordering::Relaxed);
+    ctrlc::set_handler(move || requested.store(true, Ordering::Relaxed))
+        .context("failed to register console termination handler")
+}
+
+struct TerminalGuard {
+    raw_mode: bool,
+    alternate_screen: bool,
+    restored: bool,
+}
+
+impl TerminalGuard {
+    fn enter() -> Result<Self> {
+        let mut guard = Self {
+            raw_mode: false,
+            alternate_screen: false,
+            restored: false,
+        };
+        enable_raw_mode().context("failed to enter raw terminal mode")?;
+        guard.raw_mode = true;
+        execute!(stdout(), EnterAlternateScreen).context("failed to enter alternate screen")?;
+        guard.alternate_screen = true;
+        Ok(guard)
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        if self.restored {
+            return Ok(());
+        }
+        self.restored = true;
+        let mut errors = Vec::new();
+        if self.raw_mode
+            && let Err(error) = disable_raw_mode()
+        {
+            errors.push(format!("failed to leave raw terminal mode: {error}"));
+        }
+        if self.alternate_screen
+            && let Err(error) = execute!(stdout(), LeaveAlternateScreen)
+        {
+            errors.push(format!("failed to leave alternate screen: {error}"));
+        }
+        if let Err(error) = execute!(stdout(), Show) {
+            errors.push(format!("failed to restore cursor: {error}"));
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            bail!(errors.join("; "))
+        }
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
 }
 
 fn install_panic_hook() {

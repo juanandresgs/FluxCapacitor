@@ -21,6 +21,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88.0
       - run: cargo test --locked
 
+  runtime-smoke:
+    name: Native runtime smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - run: cargo test --locked receives_native_events_from_multiple_roots_concurrently
+      - run: cargo test --locked translates_create_modify_rename_and_delete
+      - run: cargo test --locked native_git_event_emits_commit_activity
+      - run: cargo test --locked recovered_git_metadata_watch_resumes_activity
+      - run: cargo test --locked linked_worktree_joins_from_native_git_metadata
+      - run: cargo test --locked scheduled_watch_recovery_resumes_native_events
+
   quality:
     name: Format and lint
     runs-on: ubuntu-latest
@@ -32,3 +49,13 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo publish --dry-run
+      - run: cargo package --locked --no-verify
+      - name: Enforce source package size
+        run: |
+          python - <<'PY'
+          import glob, os
+          package = glob.glob("target/package/flux-capacitor-*.crate")[0]
+          size = os.path.getsize(package)
+          assert size < 262_144, f"package is {size} bytes; expected less than 256 KiB"
+          print(f"package size: {size} bytes")
+          PY

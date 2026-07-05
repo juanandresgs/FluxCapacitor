@@ -88,7 +88,16 @@ fn draw_header(
     } else if watcher.is_seeding() {
         " ● LIVE · BASELINING ".to_string()
     } else if observer_level != crate::model::IntegrityLevel::Info {
-        format!(" {} ", observer_level.label())
+        format!(
+            " {} · {} SOURCE{} ",
+            observer_level.label(),
+            app.unhealthy_observer_count(),
+            if app.unhealthy_observer_count() == 1 {
+                ""
+            } else {
+                "S"
+            }
+        )
     } else {
         " ● LIVE ".to_string()
     };

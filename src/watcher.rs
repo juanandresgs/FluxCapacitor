@@ -1,22 +1,37 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Component, Path, PathBuf},
-    sync::mpsc::{self, Receiver},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, TrySendError},
+    },
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
 use notify::{ErrorKind, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use similar::{ChangeTag, TextDiff};
-use walkdir::{DirEntry, FilterEntry, IntoIter, WalkDir};
+use walkdir::{DirEntry, WalkDir};
 
 use crate::model::{DiffKind, DiffLine, IntegrityEvent, IntegrityLevel};
 
 const MAX_TEXT_BYTES: u64 = 1024 * 1024;
 const MAX_DIFF_LINES: usize = 300;
 const INITIAL_SEED_BUDGET: usize = 2048;
+const FILESYSTEM_QUEUE_CAPACITY: usize = 8192;
+const RECOVERY_INITIAL_DELAY: Duration = Duration::from_millis(250);
+const RECOVERY_MAX_DELAY: Duration = Duration::from_secs(10);
+pub const DEFAULT_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_SNAPSHOT_ENTRIES: usize = 200_000;
 
-type SnapshotSeeder = FilterEntry<IntoIter, fn(&DirEntry) -> bool>;
+type SnapshotSeeder = Box<dyn Iterator<Item = walkdir::Result<DirEntry>>>;
+
+struct RecoveryState {
+    attempts: u32,
+    next_attempt: Instant,
+}
 
 #[derive(Clone, Debug)]
 pub struct Snapshot {
@@ -32,6 +47,13 @@ pub struct WatchState {
     pub snapshots: HashMap<PathBuf, Snapshot>,
     pub receiver: Receiver<notify::Result<Event>>,
     seeders: Vec<SnapshotSeeder>,
+    watched_roots: HashSet<PathBuf>,
+    failed_roots: HashMap<PathBuf, RecoveryState>,
+    dropped_events: Arc<AtomicU64>,
+    snapshot_bytes: usize,
+    max_snapshot_bytes: usize,
+    max_snapshot_entries: usize,
+    snapshot_omissions: u64,
     _watcher: RecommendedWatcher,
 }
 
@@ -43,20 +65,42 @@ pub struct DiffResult {
 }
 
 impl WatchState {
+    #[cfg(test)]
     pub fn start(roots: Vec<PathBuf>) -> Result<Self> {
-        let (sender, receiver) = mpsc::channel();
+        Self::start_with_snapshot_budget(roots, DEFAULT_SNAPSHOT_BYTES)
+    }
+
+    #[cfg(test)]
+    pub fn start_with_snapshot_budget(
+        roots: Vec<PathBuf>,
+        max_snapshot_bytes: usize,
+    ) -> Result<Self> {
+        Self::start_with_snapshot_limits(roots, max_snapshot_bytes, DEFAULT_SNAPSHOT_ENTRIES)
+    }
+
+    pub fn start_with_snapshot_limits(
+        roots: Vec<PathBuf>,
+        max_snapshot_bytes: usize,
+        max_snapshot_entries: usize,
+    ) -> Result<Self> {
+        let (sender, receiver) = mpsc::sync_channel(FILESYSTEM_QUEUE_CAPACITY);
+        let dropped_events = Arc::new(AtomicU64::new(0));
+        let callback_drops = Arc::clone(&dropped_events);
         let mut watcher = notify::recommended_watcher(move |result| {
-            let _ = sender.send(result);
+            if let Err(TrySendError::Full(_)) = sender.try_send(result) {
+                callback_drops.fetch_add(1, Ordering::Relaxed);
+            }
         })
         .context("failed to create filesystem watcher")?;
 
         let snapshots = HashMap::new();
         let mut seeders = Vec::new();
-        for root in minimal_observation_roots(&roots) {
+        let observation_roots = minimal_observation_roots(&roots);
+        for root in &observation_roots {
             watcher
-                .watch(&root, RecursiveMode::Recursive)
+                .watch(root, RecursiveMode::Recursive)
                 .with_context(|| format!("failed to watch {}", root.display()))?;
-            seeders.push(snapshot_seeder(&root));
+            seeders.push(snapshot_seeder(root));
         }
 
         let root_labels = build_root_labels(&roots);
@@ -66,6 +110,13 @@ impl WatchState {
             snapshots,
             receiver,
             seeders,
+            watched_roots: observation_roots.into_iter().collect(),
+            failed_roots: HashMap::new(),
+            dropped_events,
+            snapshot_bytes: 0,
+            max_snapshot_bytes,
+            max_snapshot_entries,
+            snapshot_omissions: 0,
             _watcher: watcher,
         };
         state.seed_step(INITIAL_SEED_BUDGET);
@@ -92,17 +143,152 @@ impl WatchState {
 
     pub fn take_snapshot(&mut self, path: &Path) -> Snapshot {
         let snapshot = read_snapshot(path);
-        self.snapshots.insert(path.to_path_buf(), snapshot.clone());
-        snapshot
+        self.store_snapshot(path.to_path_buf(), snapshot)
     }
 
     pub fn remove_snapshot(&mut self, path: &Path) -> Snapshot {
-        self.snapshots.remove(path).unwrap_or_else(|| Snapshot {
-            content: None,
-            size: 0,
-            is_dir: path.is_dir(),
-            read_error: None,
-        })
+        self.snapshots.remove(path).map_or_else(
+            || Snapshot {
+                content: None,
+                size: 0,
+                is_dir: path.is_dir(),
+                read_error: None,
+            },
+            |snapshot| {
+                self.snapshot_bytes = self
+                    .snapshot_bytes
+                    .saturating_sub(snapshot.content.as_ref().map_or(0, String::len));
+                snapshot
+            },
+        )
+    }
+
+    pub fn remove_snapshot_tree(&mut self, path: &Path) {
+        let removed_bytes = self
+            .snapshots
+            .iter()
+            .filter(|(candidate, _)| *candidate == path || candidate.starts_with(path))
+            .map(|(_, snapshot)| snapshot.content.as_ref().map_or(0, String::len))
+            .sum::<usize>();
+        self.snapshots
+            .retain(|candidate, _| candidate != path && !candidate.starts_with(path));
+        self.snapshot_bytes = self.snapshot_bytes.saturating_sub(removed_bytes);
+    }
+
+    pub fn remap_snapshot_descendants(&mut self, from: &Path, to: &Path) {
+        let moved = self
+            .snapshots
+            .keys()
+            .filter(|path| *path != from && path.starts_with(from))
+            .cloned()
+            .collect::<Vec<_>>();
+        for old_path in moved {
+            let Some(snapshot) = self.snapshots.remove(&old_path) else {
+                continue;
+            };
+            let Ok(relative) = old_path.strip_prefix(from) else {
+                continue;
+            };
+            if let Some(replaced) = self.snapshots.insert(to.join(relative), snapshot) {
+                self.snapshot_bytes = self
+                    .snapshot_bytes
+                    .saturating_sub(replaced.content.as_ref().map_or(0, String::len));
+            }
+        }
+    }
+
+    pub fn is_ignored(&self, path: &Path) -> bool {
+        let root = self.root_for(path);
+        path.strip_prefix(root).is_ok_and(ignored)
+    }
+
+    pub fn take_dropped_events(&self) -> u64 {
+        self.dropped_events.swap(0, Ordering::Relaxed)
+    }
+
+    pub fn take_snapshot_omissions(&mut self) -> u64 {
+        std::mem::take(&mut self.snapshot_omissions)
+    }
+
+    pub fn schedule_recovery(&mut self, root: PathBuf) {
+        let _ = self._watcher.unwatch(&root);
+        self.watched_roots.remove(&root);
+        self.remove_snapshot_tree(&root);
+        self.failed_roots.entry(root).or_insert(RecoveryState {
+            attempts: 0,
+            next_attempt: Instant::now() + RECOVERY_INITIAL_DELAY,
+        });
+    }
+
+    pub fn recover_due(&mut self) -> Vec<IntegrityEvent> {
+        let now = Instant::now();
+        let due = self
+            .failed_roots
+            .iter()
+            .filter(|(_, state)| state.next_attempt <= now)
+            .map(|(root, _)| root.clone())
+            .collect::<Vec<_>>();
+        let mut recovered = Vec::new();
+        for root in due {
+            let result = root
+                .is_dir()
+                .then(|| self._watcher.watch(&root, RecursiveMode::Recursive))
+                .transpose();
+            if matches!(result, Ok(Some(()))) {
+                self.failed_roots.remove(&root);
+                self.watched_roots.insert(root.clone());
+                self.seeders.push(snapshot_seeder(&root));
+                recovered.push(IntegrityEvent {
+                    level: IntegrityLevel::Info,
+                    source: "filesystem",
+                    summary: "watch recovered".into(),
+                    detail:
+                        "native observation resumed; events during the gap were not reconstructed"
+                            .into(),
+                    root,
+                });
+                continue;
+            }
+            if let Some(state) = self.failed_roots.get_mut(&root) {
+                state.attempts = state.attempts.saturating_add(1);
+                let exponent = state.attempts.min(5);
+                let delay = RECOVERY_INITIAL_DELAY
+                    .saturating_mul(2_u32.saturating_pow(exponent))
+                    .min(RECOVERY_MAX_DELAY);
+                state.next_attempt = now + delay;
+            }
+        }
+        recovered
+    }
+
+    fn store_snapshot(&mut self, path: PathBuf, mut snapshot: Snapshot) -> Snapshot {
+        if let Some(previous) = self.snapshots.remove(&path) {
+            self.snapshot_bytes = self
+                .snapshot_bytes
+                .saturating_sub(previous.content.as_ref().map_or(0, String::len));
+        }
+        if self.snapshots.len() >= self.max_snapshot_entries {
+            snapshot.content = None;
+            snapshot.read_error = Some(format!(
+                "snapshot omitted because the {} entry memory limit is full",
+                self.max_snapshot_entries
+            ));
+            self.snapshot_omissions += 1;
+            return snapshot;
+        }
+        let content_bytes = snapshot.content.as_ref().map_or(0, String::len);
+        if content_bytes > self.max_snapshot_bytes.saturating_sub(self.snapshot_bytes) {
+            snapshot.content = None;
+            snapshot.read_error = Some(format!(
+                "snapshot content omitted because the {} byte memory budget is full",
+                self.max_snapshot_bytes
+            ));
+            self.snapshot_omissions += 1;
+        } else {
+            self.snapshot_bytes += content_bytes;
+        }
+        self.snapshots.insert(path, snapshot.clone());
+        snapshot
     }
 
     pub fn previous_snapshot(&self, path: &Path) -> Option<&Snapshot> {
@@ -162,8 +348,7 @@ impl WatchState {
                     processed += 1;
                     let path = entry.path();
                     if path.exists() && !self.snapshots.contains_key(path) {
-                        self.snapshots
-                            .insert(path.to_path_buf(), read_snapshot(path));
+                        self.store_snapshot(path.to_path_buf(), read_snapshot(path));
                     }
                 }
                 Some(Err(_)) => processed += 1,
@@ -379,17 +564,14 @@ pub fn build_diff(previous: Option<&str>, current: Option<&str>) -> DiffResult {
 }
 
 fn snapshot_seeder(root: &Path) -> SnapshotSeeder {
-    WalkDir::new(root)
-        .into_iter()
-        .filter_entry(included_entry as fn(&DirEntry) -> bool)
-}
-
-fn included_entry(entry: &DirEntry) -> bool {
-    !ignored_entry(entry)
-}
-
-fn ignored_entry(entry: &DirEntry) -> bool {
-    entry.depth() > 0 && ignored(entry.path())
+    let root = root.to_path_buf();
+    Box::new(WalkDir::new(&root).into_iter().filter_entry(move |entry| {
+        entry.depth() == 0
+            || entry
+                .path()
+                .strip_prefix(&root)
+                .is_ok_and(|relative| !ignored(relative))
+    }))
 }
 
 #[cfg(test)]
@@ -422,6 +604,118 @@ mod tests {
         assert!(ignored(Path::new("project/target/debug/app")));
         assert!(!ignored(Path::new("project/.github/workflows/check.yml")));
         assert!(!ignored(Path::new("project/src/main.rs")));
+    }
+
+    #[test]
+    fn explicit_roots_are_not_ignored_by_ancestor_or_root_name() {
+        let root = PathBuf::from("/work/target");
+        let mut state = WatchState::start(vec![temporary_directory("ignored-root")])
+            .expect("temporary watch state");
+        state.roots = vec![root.clone()];
+        assert!(!state.is_ignored(&root.join("src/main.rs")));
+        assert!(state.is_ignored(&root.join("target/debug/app")));
+    }
+
+    #[test]
+    fn remaps_and_removes_descendant_snapshots_as_a_tree() {
+        let root = temporary_directory("snapshot-tree");
+        let from = root.join("before");
+        let to = root.join("after");
+        fs::create_dir_all(from.join("nested")).expect("nested directory");
+        fs::write(from.join("nested/file.txt"), "before\n").expect("file");
+        let mut state = WatchState::start(vec![root.clone()]).expect("watch state");
+        while state.is_seeding() {
+            state.seed_step(1024);
+        }
+
+        state.remap_snapshot_descendants(&from, &to);
+        assert!(
+            state
+                .previous_snapshot(&to.join("nested/file.txt"))
+                .is_some()
+        );
+        assert!(
+            state
+                .previous_snapshot(&from.join("nested/file.txt"))
+                .is_none()
+        );
+
+        state.remove_snapshot_tree(&to);
+        assert!(
+            state
+                .previous_snapshot(&to.join("nested/file.txt"))
+                .is_none()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn snapshot_budget_omits_content_and_reports_pressure() {
+        let root = temporary_directory("snapshot-budget");
+        let path = root.join("file.txt");
+        fs::write(&path, "larger than budget\n").expect("file");
+        let mut state =
+            WatchState::start_with_snapshot_budget(vec![root.clone()], 4).expect("watch state");
+        while state.is_seeding() {
+            state.seed_step(1024);
+        }
+        assert!(
+            state
+                .previous_snapshot(&path)
+                .is_some_and(|snapshot| snapshot.content.is_none())
+        );
+        assert!(state.take_snapshot_omissions() > 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn snapshot_entry_limit_bounds_retained_paths() {
+        let root = temporary_directory("snapshot-entry-limit");
+        for name in ["one.txt", "two.txt", "three.txt"] {
+            fs::write(root.join(name), name).expect("file");
+        }
+        let mut state =
+            WatchState::start_with_snapshot_limits(vec![root.clone()], DEFAULT_SNAPSHOT_BYTES, 2)
+                .expect("watch state");
+        while state.is_seeding() {
+            state.seed_step(1024);
+        }
+        assert_eq!(state.snapshots.len(), 2);
+        assert!(state.take_snapshot_omissions() > 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scheduled_watch_recovery_resumes_native_events() {
+        let root = temporary_directory("watch-recovery")
+            .canonicalize()
+            .expect("canonical root");
+        let mut state = WatchState::start(vec![root.clone()]).expect("watch state");
+        state.schedule_recovery(root.clone());
+        thread::sleep(RECOVERY_INITIAL_DELAY + Duration::from_millis(50));
+        let recovered = state.recover_due();
+        assert!(recovered.iter().any(|event| {
+            event.level == IntegrityLevel::Info
+                && event.root == root
+                && event.summary == "watch recovered"
+        }));
+
+        let path = root.join("after-recovery.txt");
+        fs::write(&path, "observed\n").expect("write recovered file");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut observed = false;
+        while Instant::now() < deadline && !observed {
+            let Ok(result) = state.receiver.recv_timeout(Duration::from_millis(250)) else {
+                continue;
+            };
+            observed = result
+                .expect("native event")
+                .paths
+                .iter()
+                .any(|candidate| candidate == &path);
+        }
+        assert!(observed, "recovered watch produced no native event");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

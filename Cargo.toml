@@ -8,6 +8,7 @@ license = "MIT"
 repository = "https://github.com/juanandresgs/FluxCapacitor"
 readme = "README.md"
 rust-version = "1.88"
+include = ["src/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "CHANGELOG.md"]
 keywords = ["filesystem", "tui", "watcher", "git", "developer-tools"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -26,6 +27,12 @@ notify = "8.2.0"
 ratatui = "0.30.2"
 similar = "3.1.1"
 walkdir = "2.5.0"
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3.18"
+
+[target.'cfg(windows)'.dependencies]
+ctrlc = "3.5.1"
 
 # The profile that 'dist' will build with
 [profile.dist]

@@ -2,7 +2,11 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::{Command, Output},
-    sync::mpsc::{self, Receiver, TryRecvError},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, TryRecvError, TrySendError},
+    },
     time::{Duration, Instant},
 };
 
@@ -15,6 +19,15 @@ use crate::{
 };
 
 const EVENT_QUIET_PERIOD: Duration = Duration::from_millis(120);
+const GIT_QUEUE_CAPACITY: usize = 4096;
+const MAX_GIT_EVENTS_PER_DRAIN: usize = 1024;
+const RECOVERY_INITIAL_DELAY: Duration = Duration::from_millis(250);
+const RECOVERY_MAX_DELAY: Duration = Duration::from_secs(10);
+
+struct RecoveryState {
+    attempts: u32,
+    next_attempt: Instant,
+}
 
 #[derive(Clone, Debug)]
 struct RepoSnapshot {
@@ -72,6 +85,8 @@ pub struct GitMonitor {
     known_worktrees: HashSet<PathBuf>,
     worktrees_dirty_since: HashMap<PathBuf, Instant>,
     receiver: Receiver<notify::Result<Event>>,
+    dropped_events: Arc<AtomicU64>,
+    failed_metadata: HashMap<PathBuf, RecoveryState>,
     _watcher: RecommendedWatcher,
     disconnected_reported: bool,
 }
@@ -84,9 +99,13 @@ pub enum GitMonitorEvent {
 
 impl GitMonitor {
     pub fn discover(roots: &[PathBuf]) -> Result<Self> {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(GIT_QUEUE_CAPACITY);
+        let dropped_events = Arc::new(AtomicU64::new(0));
+        let callback_drops = Arc::clone(&dropped_events);
         let mut watcher = notify::recommended_watcher(move |result| {
-            let _ = sender.send(result);
+            if let Err(TrySendError::Full(_)) = sender.try_send(result) {
+                callback_drops.fetch_add(1, Ordering::Relaxed);
+            }
         })
         .context("failed to create Git metadata watcher")?;
         let mut seen = HashSet::new();
@@ -142,6 +161,8 @@ impl GitMonitor {
             worktrees_dirty_since: HashMap::new(),
             repositories,
             receiver,
+            dropped_events,
+            failed_metadata: HashMap::new(),
             _watcher: watcher,
             disconnected_reported: false,
         })
@@ -149,9 +170,24 @@ impl GitMonitor {
 
     pub fn drain(&mut self) -> Vec<GitMonitorEvent> {
         let mut output = Vec::new();
+        let dropped = self.dropped_events.swap(0, Ordering::Relaxed);
+        if dropped > 0 {
+            output.push(GitMonitorEvent::Integrity(IntegrityEvent {
+                level: IntegrityLevel::Uncertain,
+                source: "git",
+                summary: "Git event queue overflowed".into(),
+                detail: format!("{dropped} native metadata events were dropped"),
+                root: PathBuf::new(),
+            }));
+        }
+        let mut processed = 0;
         loop {
+            if processed >= MAX_GIT_EVENTS_PER_DRAIN {
+                break;
+            }
             match self.receiver.try_recv() {
                 Ok(Ok(event)) => {
+                    processed += 1;
                     if event.need_rescan() {
                         output.push(GitMonitorEvent::Integrity(IntegrityEvent {
                             level: IntegrityLevel::Uncertain,
@@ -193,14 +229,35 @@ impl GitMonitor {
                     }
                 }
                 Ok(Err(error)) => {
+                    processed += 1;
+                    let affected = error.paths.clone();
                     let fallback = self
                         .repositories
                         .first()
                         .map(|repository| repository.root.as_path())
                         .unwrap_or_else(|| Path::new("."));
-                    output.push(GitMonitorEvent::Integrity(integrity_from_notify_error(
-                        "git", error, fallback,
-                    )));
+                    let mut integrity = integrity_from_notify_error("git", error, fallback);
+                    if let Some(repository) = self.repositories.iter().find(|repository| {
+                        integrity.root.starts_with(&repository.git_dir)
+                            || integrity.root.starts_with(&repository.common_dir)
+                    }) {
+                        integrity.root = repository.root.clone();
+                    }
+                    output.push(GitMonitorEvent::Integrity(integrity));
+                    for metadata in self
+                        .watched_metadata
+                        .iter()
+                        .filter(|metadata| {
+                            affected.is_empty()
+                                || affected.iter().any(|path| {
+                                    path.starts_with(metadata) || metadata.starts_with(path)
+                                })
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                    {
+                        self.schedule_metadata_recovery(metadata);
+                    }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -222,6 +279,8 @@ impl GitMonitor {
                 }
             }
         }
+
+        output.extend(self.recover_metadata());
 
         let mut activities = Vec::new();
         for repository in &mut self.repositories {
@@ -262,6 +321,65 @@ impl GitMonitor {
                 if self.known_worktrees.insert(worktree.clone()) {
                     output.push(GitMonitorEvent::RelatedWorktree(worktree));
                 }
+            }
+        }
+        output
+    }
+
+    fn schedule_metadata_recovery(&mut self, path: PathBuf) {
+        let _ = self._watcher.unwatch(&path);
+        self.watched_metadata.remove(&path);
+        self.failed_metadata.entry(path).or_insert(RecoveryState {
+            attempts: 0,
+            next_attempt: Instant::now() + RECOVERY_INITIAL_DELAY,
+        });
+    }
+
+    fn recover_metadata(&mut self) -> Vec<GitMonitorEvent> {
+        let now = Instant::now();
+        let due = self
+            .failed_metadata
+            .iter()
+            .filter(|(_, state)| state.next_attempt <= now)
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        let mut output = Vec::new();
+        for path in due {
+            let result = path
+                .is_dir()
+                .then(|| self._watcher.watch(&path, RecursiveMode::Recursive))
+                .transpose();
+            if matches!(result, Ok(Some(()))) {
+                self.failed_metadata.remove(&path);
+                self.watched_metadata.insert(path.clone());
+                let repository = self
+                    .repositories
+                    .iter_mut()
+                    .find(|repository| path == repository.git_dir || path == repository.common_dir);
+                let root = if let Some(repository) = repository {
+                    repository.snapshot = read_snapshot(&repository.root, &repository.git_dir);
+                    repository.root.clone()
+                } else {
+                    PathBuf::new()
+                };
+                output.push(GitMonitorEvent::Integrity(IntegrityEvent {
+                    level: IntegrityLevel::Info,
+                    source: "git",
+                    summary: "Git metadata watch recovered".into(),
+                    detail:
+                        "native observation resumed; events during the gap were not reconstructed"
+                            .into(),
+                    root,
+                }));
+                continue;
+            }
+            if let Some(state) = self.failed_metadata.get_mut(&path) {
+                state.attempts = state.attempts.saturating_add(1);
+                let exponent = state.attempts.min(5);
+                let delay = RECOVERY_INITIAL_DELAY
+                    .saturating_mul(2_u32.saturating_pow(exponent))
+                    .min(RECOVERY_MAX_DELAY);
+                state.next_attempt = now + delay;
             }
         }
         output
@@ -843,6 +961,45 @@ mod tests {
                 .iter()
                 .any(|activity| activity.summary == "branch created: side")
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recovered_git_metadata_watch_resumes_activity() {
+        let root = temporary_directory();
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.name", "Flux Test"]);
+        git(&root, &["config", "user.email", "flux@example.invalid"]);
+        fs::write(root.join("story.txt"), "first\n").expect("write initial file");
+        git(&root, &["add", "story.txt"]);
+        git(&root, &["commit", "-qm", "initial"]);
+
+        let mut monitor = GitMonitor::discover(std::slice::from_ref(&root)).expect("Git monitor");
+        let git_dir = monitor.repositories[0].git_dir.clone();
+        monitor.schedule_metadata_recovery(git_dir);
+        thread::sleep(RECOVERY_INITIAL_DELAY + Duration::from_millis(50));
+        assert!(monitor.recover_metadata().into_iter().any(|event| matches!(
+            event,
+            GitMonitorEvent::Integrity(IntegrityEvent {
+                level: IntegrityLevel::Info,
+                summary,
+                ..
+            }) if summary == "Git metadata watch recovered"
+        )));
+
+        fs::write(root.join("story.txt"), "first\nsecond\n").expect("write changed file");
+        git(&root, &["add", "story.txt"]);
+        git(&root, &["commit", "-qm", "after recovery"]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut observed = false;
+        while Instant::now() < deadline && !observed {
+            thread::sleep(Duration::from_millis(40));
+            observed = monitor.drain().into_iter().any(|event| matches!(
+                event,
+                GitMonitorEvent::Activity(GitActivity { detail, .. }) if detail == "after recovery"
+            ));
+        }
+        assert!(observed, "recovered Git watch produced no commit activity");
         let _ = fs::remove_dir_all(root);
     }
 

@@ -4,29 +4,17 @@
 
 A native terminal timeline for filesystem and Git activity. No agent wrappers, polling, or vendor integration.
 
-![Flux following a newly created Git worktree and showing live file and Git events](assets/demo.gif)
+![Flux following a newly created Git worktree and showing live file and Git events](https://raw.githubusercontent.com/juanandresgs/FluxCapacitor/main/assets/demo.gif)
 
 ## Install
 
-### Homebrew
+Flux has not published its first binary release yet. Install the current alpha from source:
 
 ```sh
-brew install juanandresgs/tap/flux
+cargo install --git https://github.com/juanandresgs/FluxCapacitor --locked
 ```
 
-### macOS and Linux
-
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/juanandresgs/FluxCapacitor/releases/latest/download/flux-capacitor-installer.sh | sh
-```
-
-### Windows PowerShell
-
-```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/juanandresgs/FluxCapacitor/releases/latest/download/flux-capacitor-installer.ps1 | iex"
-```
-
-You can also install from source with `cargo install --git https://github.com/juanandresgs/FluxCapacitor`.
+Binary installers and Homebrew instructions will be added only after their release artifacts are published and verified.
 
 ## Run
 
@@ -45,6 +33,8 @@ flux ~/Code/api ~/Code/web ~/Code/worker
 
 Flux consumes native filesystem notifications. It does not wrap agents, poll repositories, or guess which process caused a change.
 
+Memory is bounded: callback queues report overflow as `INTEGRITY`, paused history obeys `--max-events`, and baselines default to 200,000 paths plus 64 MiB of text configurable with `--max-snapshots` and `--max-snapshot-bytes`.
+
 ## Controls
 
 | Key | Action |
@@ -57,7 +47,7 @@ Flux consumes native filesystem notifications. It does not wrap agents, poll rep
 
 ## Status
 
-Flux is an alpha. macOS is the primary tested platform; Linux and Windows are continuously tested but need more field use.
+Flux is an alpha. macOS is the primary interactive platform. Linux and Windows run native filesystem/Git smoke tests in CI but still need broader field use.
 
 [Implementation details](docs/IMPLEMENTATION_STATUS.md) · [Production readiness](docs/PRODUCTION_READINESS.md) · [Download the demo MP4](assets/demo.mp4)
 

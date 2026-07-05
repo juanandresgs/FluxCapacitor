@@ -12,7 +12,7 @@ use notify::{
 use crate::{
     git::GitActivity,
     model::{ChangeEvent, ChangeKind, IntegrityEvent, IntegrityLevel, TargetKind},
-    watcher::{Snapshot, WatchState, build_diff, ignored},
+    watcher::{Snapshot, WatchState, build_diff},
 };
 
 const RENAME_TIMEOUT: Duration = Duration::from_millis(400);
@@ -39,10 +39,12 @@ pub struct App {
     pub folders_open: bool,
     pub workspace_filter: Option<PathBuf>,
     pub max_events: usize,
-    observer_level: IntegrityLevel,
+    observer_levels: HashMap<(PathBuf, &'static str), IntegrityLevel>,
     next_id: u64,
     pending_renames: Vec<PendingRename>,
     recent: HashMap<PathBuf, (ChangeKind, Instant)>,
+    paused_dropped: u64,
+    paused_drop_root: Option<PathBuf>,
 }
 
 impl App {
@@ -61,10 +63,12 @@ impl App {
             folders_open: true,
             workspace_filter: None,
             max_events,
-            observer_level: IntegrityLevel::Info,
+            observer_levels: HashMap::new(),
             next_id: 1,
             pending_renames: Vec::new(),
             recent: HashMap::new(),
+            paused_dropped: 0,
+            paused_drop_root: None,
         }
     }
 
@@ -99,7 +103,18 @@ impl App {
     }
 
     pub fn observer_level(&self) -> IntegrityLevel {
-        self.observer_level
+        self.observer_levels
+            .values()
+            .copied()
+            .max_by_key(|level| level.severity())
+            .unwrap_or(IntegrityLevel::Info)
+    }
+
+    pub fn unhealthy_observer_count(&self) -> usize {
+        self.observer_levels
+            .values()
+            .filter(|level| **level != IntegrityLevel::Info)
+            .count()
     }
 
     pub fn move_selection(&mut self, delta: isize) {
@@ -146,6 +161,27 @@ impl App {
             while let Some(event) = self.paused_events.pop_back() {
                 self.push_event(event);
             }
+            if self.paused_dropped > 0 {
+                let dropped = std::mem::take(&mut self.paused_dropped);
+                let root = self.paused_drop_root.take().unwrap_or_default();
+                self.process_integrity(IntegrityEvent {
+                    level: IntegrityLevel::Uncertain,
+                    source: "timeline",
+                    summary: "paused retention limit reached".into(),
+                    detail: format!("{dropped} queued events were discarded while paused"),
+                    root,
+                });
+            }
+        }
+    }
+
+    fn push_paused_event(&mut self, event: ChangeEvent) {
+        self.paused_events.push_front(event);
+        while self.paused_events.len() > self.max_events {
+            if let Some(dropped) = self.paused_events.pop_back() {
+                self.paused_dropped += 1;
+                self.paused_drop_root.get_or_insert(dropped.root);
+            }
         }
     }
 
@@ -180,6 +216,7 @@ impl App {
         if matches!(event.kind, EventKind::Remove(_)) {
             for path in &event.paths {
                 if watcher.is_root(path) {
+                    watcher.schedule_recovery(path.clone());
                     self.process_integrity(IntegrityEvent {
                         level: IntegrityLevel::Lost,
                         source: "filesystem",
@@ -193,7 +230,7 @@ impl App {
         let paths: Vec<_> = event
             .paths
             .into_iter()
-            .filter(|path| !ignored(path))
+            .filter(|path| !watcher.is_ignored(path))
             .collect();
         if paths.is_empty() {
             return;
@@ -296,15 +333,22 @@ impl App {
         };
         self.next_id += 1;
         if self.paused {
-            self.paused_events.push_front(event);
+            self.push_paused_event(event);
         } else {
             self.push_event(event);
         }
     }
 
     pub fn process_integrity(&mut self, integrity: IntegrityEvent) {
-        if integrity.level.severity() > self.observer_level.severity() {
-            self.observer_level = integrity.level;
+        let key = (integrity.root.clone(), integrity.source);
+        let current = self
+            .observer_levels
+            .entry(key)
+            .or_insert(IntegrityLevel::Info);
+        if integrity.level == IntegrityLevel::Info
+            || integrity.level.severity() > current.severity()
+        {
+            *current = integrity.level;
         }
         let event = ChangeEvent {
             id: self.next_id,
@@ -323,17 +367,20 @@ impl App {
         };
         self.next_id += 1;
         if self.paused {
-            self.paused_events.push_front(event);
+            self.push_paused_event(event);
         } else {
             self.push_event(event);
         }
     }
 
-    pub fn flush_pending(&mut self, watcher: &WatchState) {
+    pub fn flush_pending(&mut self, watcher: &mut WatchState) {
         let mut index = 0;
         while index < self.pending_renames.len() {
             if self.pending_renames[index].observed_at.elapsed() >= RENAME_TIMEOUT {
                 let pending = self.pending_renames.remove(index);
+                if pending.snapshot.is_dir {
+                    watcher.remove_snapshot_tree(&pending.path);
+                }
                 self.emit_basic(
                     watcher,
                     ChangeKind::Delete,
@@ -433,6 +480,9 @@ impl App {
         to: &Path,
         previous: Snapshot,
     ) {
+        if previous.is_dir {
+            watcher.remap_snapshot_descendants(from, to);
+        }
         let current = watcher.take_snapshot(to);
         let diff = build_diff(previous.content.as_deref(), current.content.as_deref());
         self.emit(
@@ -563,13 +613,19 @@ impl App {
     }
 
     fn push_event(&mut self, event: ChangeEvent) {
-        if self.selected > 0 {
-            self.selected += 1;
-        }
+        let selected_id = self.selected_event().map(|event| event.id);
         self.events.push_front(event);
         while self.events.len() > self.max_events {
             self.events.pop_back();
         }
+        let visible = self.visible_indices();
+        self.selected = selected_id
+            .and_then(|id| {
+                visible
+                    .iter()
+                    .position(|index| self.events.get(*index).is_some_and(|event| event.id == id))
+            })
+            .unwrap_or_else(|| self.selected.min(visible.len().saturating_sub(1)));
     }
 
     fn report_snapshot_issue(&mut self, watcher: &WatchState, path: &Path, snapshot: &Snapshot) {
@@ -827,6 +883,44 @@ mod tests {
     }
 
     #[test]
+    fn directory_rename_preserves_descendant_diff_baselines() {
+        let root = temporary_directory("directory-rename");
+        let before = root.join("before");
+        let after = root.join("after");
+        let original = before.join("nested/file.txt");
+        let moved = after.join("nested/file.txt");
+        fs::create_dir_all(original.parent().expect("parent")).expect("nested directory");
+        fs::write(&original, "one\n").expect("original file");
+        let mut watcher = WatchState::start(vec![root.clone()]).expect("watch state");
+        while watcher.is_seeding() {
+            watcher.seed_step(1024);
+        }
+        let mut app = App::new(20);
+
+        fs::rename(&before, &after).expect("rename directory");
+        app.process_notify(
+            &mut watcher,
+            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                .add_path(before.clone())
+                .add_path(after),
+        );
+        fs::write(&moved, "one\ntwo\n").expect("modify moved file");
+        app.process_notify(
+            &mut watcher,
+            Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Any))).add_path(moved),
+        );
+
+        let modified = app
+            .events
+            .iter()
+            .find(|event| event.kind == ChangeKind::Modify)
+            .expect("modify event");
+        assert_eq!((modified.lines_added, modified.lines_removed), (1, 0));
+        assert!(watcher.previous_snapshot(&original).is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn watched_root_removal_emits_lost_integrity() {
         let root = temporary_directory("root-loss");
         let mut watcher = WatchState::start(vec![root.clone()]).expect("watch state");
@@ -876,6 +970,29 @@ mod tests {
     }
 
     #[test]
+    fn recovery_resets_only_the_matching_root_and_source() {
+        let mut app = App::new(20);
+        for root in ["/first", "/second"] {
+            app.process_integrity(IntegrityEvent {
+                level: IntegrityLevel::Lost,
+                source: "filesystem",
+                summary: "watch lost".into(),
+                detail: "test".into(),
+                root: PathBuf::from(root),
+            });
+        }
+        app.process_integrity(IntegrityEvent {
+            level: IntegrityLevel::Info,
+            source: "filesystem",
+            summary: "watch recovered".into(),
+            detail: "test".into(),
+            root: PathBuf::from("/first"),
+        });
+        assert_eq!(app.unhealthy_observer_count(), 1);
+        assert_eq!(app.observer_level(), IntegrityLevel::Lost);
+    }
+
+    #[test]
     fn workspace_focus_cycles_and_filters_without_reordering() {
         let first = PathBuf::from("/workspace/first");
         let second = PathBuf::from("/workspace/second");
@@ -903,6 +1020,70 @@ mod tests {
         assert_eq!(app.visible_indices().len(), 2);
         app.cycle_workspace(&roots, true);
         assert_eq!(app.workspace_filter, roots.last().cloned());
+    }
+
+    #[test]
+    fn hidden_incoming_events_do_not_move_the_selected_event() {
+        let root = PathBuf::from("/workspace");
+        let mut app = App::new(20);
+        for summary in ["first", "second", "third"] {
+            app.process_integrity(IntegrityEvent {
+                level: IntegrityLevel::Info,
+                source: "filesystem",
+                summary: summary.into(),
+                detail: "test".into(),
+                root: root.clone(),
+            });
+        }
+        app.selected = 1;
+        app.toggle_kind(0);
+        app.selected = 1;
+        let selected_id = app.selected_event().expect("selected event").id;
+
+        app.push_event(ChangeEvent {
+            id: app.next_id,
+            kind: ChangeKind::Modify,
+            target: TargetKind::File,
+            path: PathBuf::from("hidden.txt"),
+            previous_path: None,
+            root,
+            occurred_at: Instant::now(),
+            size: 1,
+            lines_added: 0,
+            lines_removed: 0,
+            diff: Vec::new(),
+            detail: None,
+            integrity_level: None,
+        });
+
+        assert_eq!(
+            app.selected_event().expect("selected event").id,
+            selected_id
+        );
+    }
+
+    #[test]
+    fn paused_events_respect_the_timeline_retention_limit() {
+        let mut app = App::new(2);
+        app.paused = true;
+        for index in 0..5 {
+            app.process_integrity(IntegrityEvent {
+                level: IntegrityLevel::Info,
+                source: "filesystem",
+                summary: format!("event {index}"),
+                detail: "test".into(),
+                root: PathBuf::from("/workspace"),
+            });
+        }
+        assert_eq!(app.paused_events.len(), 2);
+        app.toggle_pause();
+        assert!(app.events.iter().any(|event| {
+            event.kind == ChangeKind::Integrity
+                && event
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("3 queued events"))
+        }));
     }
 
     fn temporary_directory(label: &str) -> PathBuf {

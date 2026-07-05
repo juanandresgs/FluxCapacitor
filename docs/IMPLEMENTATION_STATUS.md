@@ -11,11 +11,11 @@ It is not yet appropriate to describe the timeline as a complete forensic record
 | Area | Assessment | Summary |
 | --- | --- | --- |
 | Architecture | Strong | Native event streams, no repository polling, bounded in-memory state, clean TUI separation |
-| FILE | Strong alpha | Main operations and diffs work; boundary moves and complex directory renames need more platform testing |
+| FILE | Strong alpha | Main operations, contextual diffs, root-relative ignores, and directory-tree baseline remapping work; backend event shapes still need field evidence |
 | GIT | Good alpha | Broad semantic ref/state coverage; some repository layouts and ambiguous operation outcomes remain intentionally limited |
-| INTEGRITY | Good foundation | Explicit rescan, error, channel, root-loss, and read-failure reporting; no automatic recovery or reconciliation |
-| Tests | Moderate | Twenty-five deterministic tests including runtime linked-worktree discovery, submodule checkout resolution, dynamic root registration, pre-baseline event honesty, concurrent native multi-root activity, real native Git commit/ref events, and macOS-imprecise rename shapes; platform matrix remains narrow |
-| Portability | Unproven beyond macOS | Built on cross-platform crates, but runtime behavior has only been exercised locally on macOS |
+| INTEGRITY | Good alpha | Explicit loss reporting, bounded queue overflow signals, per-root/source health, and watch recovery without false gap reconstruction |
+| Tests | Good alpha | Thirty-five deterministic and native tests cover multi-root filesystem activity, directory moves, recovery, Git worktrees, bounded retention, and diff behavior |
+| Portability | CI exercised | Native filesystem and Git smoke cases run on macOS, Linux, and Windows; interactive field use remains macOS-heavy |
 | Persistence | Not implemented | Timeline is intentionally process-local and memory-only |
 
 ## Interface hierarchy
@@ -47,7 +47,8 @@ It is not yet appropriate to describe the timeline as a complete forensic record
 - One-path rename events, as emitted by imprecise FSEvents mode, are paired using snapshot existence and pending rename state.
 - Unpaired rename-from events become deletes after a 400 ms window.
 - Unpaired rename-to events become creates.
-- Text snapshots and contextual line diffs up to 1 MiB.
+- Text snapshots and contextual line diffs up to 1 MiB per file, within a configurable 64 MiB default global baseline budget.
+- Bounded native callback queues and paused retention; overflow or eviction is surfaced as UNCERTAIN integrity rather than consuming unbounded memory or failing silently.
 - Binary and oversized-file metadata events.
 - A 300-line diff preview limit.
 - Eighty-millisecond burst coalescing for duplicate create/modify and rename/modify sequences.
@@ -59,7 +60,7 @@ It is not yet appropriate to describe the timeline as a complete forensic record
 
 - A move from a watched root to an unwatched location is generally observable as a delete; the destination is outside Flux’s evidence boundary.
 - A move from an unwatched location into a watched root is generally observable as a create.
-- Directory renames depend on backend events for descendant paths. Flux does not currently remap every cached descendant snapshot as one atomic subtree operation.
+- Native backends may still describe the same directory move differently, but paired directory moves atomically remap cached descendant snapshots.
 - Native backends may coalesce several physical writes into one event. Flux reports the state observed when it handles the event, not every write syscall.
 - Invalid UTF-8 is treated as non-text and receives no textual diff.
 - Ignore rules are currently compiled into the application rather than configurable.
@@ -127,12 +128,14 @@ The GIT implementation is broad enough to be useful and remains faithful to the 
 - LOST events for native watch exhaustion, missing watch targets, event-channel disconnection, and watched-root removal.
 - Global observer state retains the highest observed severity even when timeline events are cleared.
 - Git watcher errors use the same integrity model as filesystem watcher errors.
+- Observer health is tracked independently by root and source; the header reports the number of unhealthy sources.
+- Recoverable filesystem and Git metadata watches retry with bounded exponential backoff and emit INFO when observation resumes.
+- Recovery explicitly states that events during the gap were not reconstructed.
 
 ### Known limitations
 
 - Flux does not automatically rebuild snapshots or reconcile state after an UNCERTAIN event. That is intentional: a scan could show current state but could not reconstruct the missing event timeline.
-- Flux does not currently attempt to re-establish a lost watch at runtime.
-- Integrity is summarized globally in the header rather than tracked independently per root in the status area. Individual events retain their root.
+- Event-channel disconnection cannot be repaired in place and still requires restart.
 - Some platform backends may report generic errors without enough information to distinguish DEGRADED from LOST conclusively; Flux uses the most conservative classification supported by the error.
 - If the operating system fails silently and emits neither an error nor a rescan sentinel, Flux cannot detect that condition.
 
@@ -169,14 +172,21 @@ The current automated suite covers:
 23. Administrative Git paths resolving back to their actual working-tree checkout.
 24. Nested logical workspaces reducing to minimal physical observation roots.
 25. A modification arriving before baseline capture receiving an explicit no-baseline explanation.
+26. Root-relative ignores preserving explicitly watched roots named like generated directories.
+27. Descendant snapshots remapping across directory moves.
+28. Contextual diffs after a populated directory move.
+29. Filtered incoming events preserving selection by event identity.
+30. Paused history obeying the timeline retention limit.
+31. Snapshot content obeying a configurable byte budget.
+32. Per-root/source health recovery.
+33. A recovered native watch resuming filesystem events.
 
 ## Recommended next hardening work
 
 1. Add Linux and Windows CI/runtime tests for watcher event shapes.
 2. Add linked-worktree removal and replacement tests, including stale administrative metadata.
-3. Remap descendant snapshots atomically for directory-tree renames.
-4. Add per-root integrity state and explicit watch-recovery support without claiming gap reconstruction.
-5. Add configurable ignore patterns and retention settings.
-6. Add TUI rendering snapshots at narrow and wide terminal sizes.
+3. Add configurable ignore patterns beyond the built-in generated-directory set.
+4. Add TUI rendering snapshots at narrow and wide terminal sizes.
+5. Gather interactive Linux and Windows field evidence beyond CI smoke coverage.
 
 Categories intentionally excluded under the current evidence standard: PROCESS, MODE, DEPS, BUILD, TEST, AGENT, and inferred task grouping.
