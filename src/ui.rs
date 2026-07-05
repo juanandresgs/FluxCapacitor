@@ -40,6 +40,7 @@ pub fn draw(
     watcher: &WatchState,
     git_repositories: usize,
     beads_stores: usize,
+    work_diagnostics: &str,
 ) {
     let area = frame.area();
     let folders_height = if app.folders_open {
@@ -63,6 +64,7 @@ pub fn draw(
         watcher,
         git_repositories,
         beads_stores,
+        work_diagnostics,
     );
     draw_filters(frame, layout[1], app, watcher);
 
@@ -93,6 +95,7 @@ fn draw_header(
     watcher: &WatchState,
     git_repositories: usize,
     beads_stores: usize,
+    work_diagnostics: &str,
 ) {
     let observer_level = app.observer_level();
     let live = if app.paused {
@@ -122,7 +125,11 @@ fn draw_header(
                 "{}  ·  {}  ·  {}",
                 count_label(watcher.roots.len(), "folder", "folders"),
                 count_label(git_repositories, "repo", "repos"),
-                count_label(beads_stores, "work source", "work sources")
+                if beads_stores == 0 {
+                    "WORK off".to_string()
+                } else {
+                    work_diagnostics.to_uppercase()
+                },
             ),
             Style::default().fg(Color::Rgb(155, 155, 160)),
         ),

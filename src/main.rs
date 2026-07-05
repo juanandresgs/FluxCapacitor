@@ -161,6 +161,7 @@ fn run(
                 watcher,
                 git_monitor.repository_count(),
                 beads_monitor.store_count(),
+                &beads_monitor.diagnostics(),
             )
         })?;
 

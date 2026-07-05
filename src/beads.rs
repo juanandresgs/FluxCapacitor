@@ -48,6 +48,9 @@ pub struct BeadsMonitor {
     receiver: Receiver<notify::Result<Event>>,
     _watcher: RecommendedWatcher,
     disconnected_reported: bool,
+    marker_triggers: u64,
+    storage_triggers: u64,
+    cursor_advances: u64,
 }
 
 #[derive(Deserialize)]
@@ -78,6 +81,9 @@ impl BeadsMonitor {
             receiver,
             _watcher: watcher,
             disconnected_reported: false,
+            marker_triggers: 0,
+            storage_triggers: 0,
+            cursor_advances: 0,
         };
         for root in roots {
             monitor.discover_root(root);
@@ -87,6 +93,13 @@ impl BeadsMonitor {
 
     pub fn store_count(&self) -> usize {
         self.stores.len()
+    }
+
+    pub fn diagnostics(&self) -> String {
+        format!(
+            "work m{} s{} c{}",
+            self.marker_triggers, self.storage_triggers, self.cursor_advances
+        )
     }
 
     pub fn established_events(&self) -> Vec<IntegrityEvent> {
@@ -104,11 +117,19 @@ impl BeadsMonitor {
 
     pub fn observe_workspace_event(&mut self, event: &Event) {
         let observed_at = Instant::now();
+        let mut marker_triggers = 0;
+        let mut storage_triggers = 0;
         for store in &mut self.stores {
             for path in &event.paths {
-                store.observe_path(path, observed_at);
+                match store.observe_path(path, observed_at) {
+                    Some(BeadsTrigger::Marker) => marker_triggers += 1,
+                    Some(BeadsTrigger::Storage) => storage_triggers += 1,
+                    None => {}
+                }
             }
         }
+        self.marker_triggers += marker_triggers;
+        self.storage_triggers += storage_triggers;
 
         let roots = self.roots.clone();
         for root in roots {
@@ -139,11 +160,19 @@ impl BeadsMonitor {
                         }));
                     }
                     let observed_at = Instant::now();
+                    let mut marker_triggers = 0;
+                    let mut storage_triggers = 0;
                     for store in &mut self.stores {
                         for path in &event.paths {
-                            store.observe_path(path, observed_at);
+                            match store.observe_path(path, observed_at) {
+                                Some(BeadsTrigger::Marker) => marker_triggers += 1,
+                                Some(BeadsTrigger::Storage) => storage_triggers += 1,
+                                None => {}
+                            }
                         }
                     }
+                    self.marker_triggers += marker_triggers;
+                    self.storage_triggers += storage_triggers;
                 }
                 Ok(Err(error)) => output.push(BeadsMonitorEvent::Integrity(IntegrityEvent {
                     level: IntegrityLevel::Uncertain,
@@ -179,6 +208,9 @@ impl BeadsMonitor {
             store.suppress_storage_until = Some(Instant::now() + Duration::from_secs(1));
             match advance_store(store) {
                 Ok(activities) => {
+                    if !activities.is_empty() {
+                        self.cursor_advances += 1;
+                    }
                     output.extend(activities.into_iter().map(BeadsMonitorEvent::Activity))
                 }
                 Err(error) => output.push(BeadsMonitorEvent::Integrity(IntegrityEvent {
@@ -256,10 +288,10 @@ impl BeadsMonitor {
 }
 
 impl BeadsStore {
-    fn observe_path(&mut self, path: &Path, observed_at: Instant) {
+    fn observe_path(&mut self, path: &Path, observed_at: Instant) -> Option<BeadsTrigger> {
         if path == self.root.join(".beads/last-touched") {
             self.dirty_since.get_or_insert(observed_at);
-            return;
+            return Some(BeadsTrigger::Marker);
         }
         if path.starts_with(&self.data_dir)
             && self
@@ -267,8 +299,16 @@ impl BeadsStore {
                 .is_none_or(|until| observed_at >= until)
         {
             self.dirty_since.get_or_insert(observed_at);
+            return Some(BeadsTrigger::Storage);
         }
+        None
     }
+}
+
+#[derive(Clone, Copy)]
+enum BeadsTrigger {
+    Marker,
+    Storage,
 }
 
 fn open_store(root: &Path, metadata_path: &Path) -> Result<BeadsStore> {
@@ -677,12 +717,14 @@ mod tests {
             dirty_since: None,
             suppress_storage_until: Some(now + Duration::from_secs(1)),
         };
-        store.observe_path(
+        let trigger = store.observe_path(
             Path::new("/project/.beads/embeddeddolt/flux/.dolt/noms/manifest"),
             now,
         );
+        assert!(trigger.is_none());
         assert!(store.dirty_since.is_none());
-        store.observe_path(Path::new("/project/.beads/last-touched"), now);
+        let trigger = store.observe_path(Path::new("/project/.beads/last-touched"), now);
+        assert!(matches!(trigger, Some(BeadsTrigger::Marker)));
         assert_eq!(store.dirty_since, Some(now));
     }
 
